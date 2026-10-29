@@ -1,0 +1,18 @@
+{
+  "identifier": "main",
+  "description": "Local window lifecycle, title bar drag and zoom, and explicit clipboard writes. No clipboard reads.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "allow-frontend-ready",
+    "allow-finish-exit",
+    "clipboard-manager:allow-write-text",
+    "allow-start-discovery",
+    "allow-discovery-snapshot"
+  ]
+}

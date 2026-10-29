@@ -1,0 +1,64 @@
+name: Build macOS
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check release version
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/packaging/check-version.mjs
+      - name: Install dependencies
+        run: |
+          npm ci
+          python -m pip install -r scripts/packaging/requirements.txt
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Check frontend and Rust
+        run: |
+          npm test
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - name: Build universal app
+        run: |
+          npm run tauri -- build --bundles app --target universal-apple-darwin --no-sign --no-binary-patching
+          lipo src-tauri/target/universal-apple-darwin/release/bundle/macos/Flutrace.app/Contents/MacOS/flutrace -verify_arch arm64 x86_64
+      - name: Package DMG
+        run: |
+          mkdir -p release
+          python scripts/packaging/build-dmg.py src-tauri/target/universal-apple-darwin/release/bundle/macos/Flutrace.app release
+          cd release
+          shasum -a 256 *.dmg > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flutrace-macos-universal
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
