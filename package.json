@@ -1,6 +1,6 @@
 {
   "name": "flutrace",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Network inspector for Flutter.",
   "author": "Riccardo",
@@ -13,7 +13,9 @@
     "tauri": "tauri",
     "desktop": "tauri dev",
     "probe": "node scripts/probe.ts",
-    "mock-vm": "node scripts/mock-vm.ts"
+    "mock-vm": "node scripts/mock-vm.ts",
+    "mcp": "node mcp/main.ts",
+    "build:mcp": "vite build --config mcp/vite.config.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
@@ -23,6 +25,8 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/server": "^2.4.0",
     "@tauri-apps/cli": "^2.12.4",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.8",
@@ -36,6 +40,7 @@
     "typescript": "^7.0.2",
     "vite": "^8.3.5",
     "vitest": "^5.0.5",
-    "ws": "^8.22.0"
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
   }
 }

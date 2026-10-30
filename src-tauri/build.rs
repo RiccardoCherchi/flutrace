@@ -3,6 +3,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "frontend_ready",
             "finish_exit",
+            "publish_session",
             "start_discovery",
             "discovery_snapshot",
         ]),

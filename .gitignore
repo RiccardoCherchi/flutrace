@@ -13,3 +13,5 @@ release/
 .venv-packaging/
 
 __pycache__/
+mcp/dist/
+flutter_*.log

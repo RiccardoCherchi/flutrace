@@ -68,16 +68,20 @@ export class CaptureSession {
   private detailVersion = 0;
   private dial: (url: string) => Promise<RpcTransport>;
   private intervalMs: number;
+  private history: boolean;
   private closing?: Promise<void>;
 
   constructor(
     options: {
       connect?: (url: string) => Promise<RpcTransport>;
       intervalMs?: number;
+      /** Import requests the VM recorded before connecting. */
+      history?: boolean;
     } = {},
   ) {
     this.dial = options.connect ?? ((url) => RpcClient.connect(url));
     this.intervalMs = options.intervalMs ?? 1000;
+    this.history = options.history ?? false;
   }
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => {
@@ -249,13 +253,14 @@ export class CaptureSession {
         const baseline = await this.profile(ctx, isolateId);
         if (typeof original.enabled !== "boolean")
           throw new Error("Invalid profiling state");
+        const start = this.history ? 0 : baseline.timestamp;
         const state = {
           original: original.enabled,
           profilingOn: original.enabled,
           enableKey:
             version.major === 1 && version.minor < 4 ? "enable" : "enabled",
-          cursor: baseline.timestamp,
-          cutoff: baseline.timestamp,
+          cursor: start,
+          cutoff: start,
         };
         ctx.isolates.set(isolateId, state);
       } catch {

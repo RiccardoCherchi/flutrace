@@ -8,7 +8,7 @@ import {
 import type { CSSProperties, RefObject } from "react";
 import brandIcon from "../assets/flutrace-icon.png";
 import { Discovery, DiscoveryPanel } from "./components/Discovery.tsx";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { CaptureSession } from "./vm/session.ts";
 import { mimeType } from "./vm/types.ts";
 import { RequestTable } from "./components/RequestTable.tsx";
@@ -156,6 +156,13 @@ export default function App({
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [session]);
   const connected = state.status === "connected";
+  useEffect(() => {
+    // Lets flutrace-mcp attach to the app this window is inspecting.
+    if (isTauri())
+      invoke("publish_session", { uri: connected ? url : null }).catch(
+        () => {},
+      );
+  }, [connected, url]);
   const transitioning =
     state.status === "connecting" || state.status === "disconnecting";
   const filtered = useMemo(

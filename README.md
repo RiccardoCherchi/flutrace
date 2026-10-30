@@ -98,7 +98,10 @@ history or guarantee a fixed peak memory usage.
 
 ## Captured data
 
-Headers, bodies, and session URLs stay in memory. Flutrace has no analytics or
+Headers and bodies stay in memory. While connected, Flutrace writes the VM URL to
+`~/Library/Application Support/com.riccardocherchi.flutrace/session.json`, readable
+only by your user, so `flutrace-mcp` can attach; the file is removed when you
+disconnect or quit. Flutrace has no analytics or
 automatic capture exports. Copy URL and Copy cURL write to the clipboard only
 when clicked. cURL commands include captured credentials, such as authorization
 headers and cookies.
@@ -111,6 +114,38 @@ On a clean disconnect, Flutrace restores the profiling setting it found when
 connecting. That setting is shared with other inspectors, and an unexpected
 disconnect can prevent restoration. Traffic never passes through Flutrace, so
 closing it does not interrupt your app's network requests.
+
+## Use it from an AI agent (MCP)
+
+`flutrace-mcp` is a local MCP server that lets coding agents read the same
+traffic. It runs over stdio on your machine, connects only to localhost VM
+Services, and does not need the desktop app. You need Node.js 22 or later.
+
+```sh
+claude mcp add flutrace -- npx -y flutrace-mcp    # Claude Code
+codex mcp add flutrace -- npx -y flutrace-mcp     # Codex
+opencode mcp add --global flutrace -- npx -y flutrace-mcp   # OpenCode
+```
+
+Other clients, such as Cursor, take the same command in their MCP config:
+
+```json
+{ "mcpServers": { "flutrace": { "command": "npx", "args": ["-y", "flutrace-mcp"] } } }
+```
+
+If the Flutrace app is connected to your Flutter app, the agent attaches to the
+same session on its own and also sees the requests already recorded. Otherwise
+ask it to connect with the VM Service URL from `flutter run`. Then ask it what a
+screen sends or why a call fails. The tools are `connect`,
+`status`, `list_requests`, `get_request`, `search`, `wait_for_request`,
+`as_curl`, `clear`, `pause`, `resume`, and `disconnect`.
+
+Captured data goes into the agent's context, so the server hides credentials by
+default: sensitive headers (Authorization, cookies, tokens, API keys), JWTs, and
+credential-like fields in URLs and bodies become `<redacted>`. Redaction is
+pattern-based, so review what you share. Set `FLUTRACE_MCP_SHOW_SECRETS=1` to
+turn it off, or `FLUTRACE_VM_URL` to connect without passing a URL. To run it
+from a checkout instead, use `node mcp/main.ts` as the command.
 
 ## Build on macOS
 

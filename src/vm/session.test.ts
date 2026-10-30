@@ -272,3 +272,21 @@ it("does not flash old rows when clear races an in-flight poll", async () => {
   unsubscribe();
   expect(counts.every((count) => count === 0)).toBe(true);
 });
+
+it("imports requests recorded before connecting only when asked", async () => {
+  const earlier = request("old", "i", 50);
+  for (const history of [false, true]) {
+    const vm = new Vm();
+    vm.profiles.set("i", [earlier]);
+    const session = new CaptureSession({
+      connect: async () => vm,
+      intervalMs: 60000,
+      history,
+    });
+    sessions.push(session);
+    await session.connect("unused");
+    expect(session.getSnapshot().rows.map((row) => row.id)).toEqual(
+      history ? ["old"] : [],
+    );
+  }
+});

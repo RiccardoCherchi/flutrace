@@ -23,6 +23,33 @@ fn finish_exit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+fn session_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    Some(app.path().app_data_dir().ok()?.join("session.json"))
+}
+
+/// Shares the connected VM Service URL with flutrace-mcp through a file only
+/// the current user can read. Passing no URL removes it.
+#[tauri::command]
+fn publish_session(app: tauri::AppHandle, uri: Option<String>) {
+    let Some(path) = session_file(&app) else {
+        return;
+    };
+    let Some(uri) = uri else {
+        let _ = std::fs::remove_file(path);
+        return;
+    };
+    let contents = serde_json::json!({ "vmServiceUri": uri, "pid": std::process::id() });
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let _ = path
+        .parent()
+        .map(std::fs::create_dir_all)
+        .and_then(|_| options.open(&path).ok())
+        .map(|mut file| std::io::Write::write_all(&mut file, contents.to_string().as_bytes()));
+}
+
 fn request_shutdown(app: &tauri::AppHandle) {
     if app
         .state::<Lifecycle>()
@@ -95,6 +122,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             frontend_ready,
             finish_exit,
+            publish_session,
             discovery::start_discovery,
             discovery::discovery_snapshot
         ])
@@ -111,6 +139,9 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 app.state::<discovery::Discovery>().stop();
+                if let Some(path) = session_file(app) {
+                    let _ = std::fs::remove_file(path);
+                }
             }
             if let tauri::RunEvent::ExitRequested {
                 code: None, api, ..

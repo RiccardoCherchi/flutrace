@@ -1,6 +1,6 @@
 {
   "identifier": "main",
-  "description": "Local window lifecycle, title bar drag and zoom, and explicit clipboard writes. No clipboard reads.",
+  "description": "Local window lifecycle, title bar drag and zoom, and explicit clipboard writes, and sharing the connected session with flutrace-mcp. No clipboard reads.",
   "windows": [
     "main"
   ],
@@ -11,6 +11,7 @@
     "core:window:allow-internal-toggle-maximize",
     "allow-frontend-ready",
     "allow-finish-exit",
+    "allow-publish-session",
     "clipboard-manager:allow-write-text",
     "allow-start-discovery",
     "allow-discovery-snapshot"

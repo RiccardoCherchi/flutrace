@@ -1,0 +1,17 @@
+{
+  "name": "flutrace-mcp",
+  "version": "0.2.0",
+  "description": "MCP server that lets AI agents read the HTTP traffic of a Flutter app in debug mode.",
+  "author": "Riccardo",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "flutrace-mcp": "dist/flutrace-mcp.js" },
+  "files": ["dist"],
+  "engines": { "node": ">=22" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RiccardoCherchi/flutrace.git",
+    "directory": "mcp"
+  },
+  "keywords": ["mcp", "flutter", "dart", "network", "http", "devtools"]
+}
