@@ -371,20 +371,21 @@ it("keeps capturing HTTP when sockets are unsupported", async () => {
 it("collects app-reported WebSocket messages per connection", async () => {
   const { vm, session } = setup();
   await session.connect("unused");
+  const base = Date.now();
   expect(
     vm.calls.some(
       (call) =>
         call.method === "streamListen" && call.params.streamId === "Extension",
     ),
   ).toBe(true);
-  vm.ws({ type: "open", id: "1", url: "wss://x.test:9443/ws", at: 1000 });
+  vm.ws({ type: "open", id: "1", url: "wss://x.test:9443/ws", at: base });
   vm.ws({
     type: "message",
     id: "1",
     direction: "in",
     size: 9,
     text: '{"p":"1"}',
-    at: 1100,
+    at: base + 100,
   });
   vm.ws({ type: "message", id: "1", direction: "out", size: 2, text: "hi" });
   // Unrelated extension events are ignored.
@@ -399,10 +400,10 @@ it("collects app-reported WebSocket messages per connection", async () => {
     ["in", '{"p":"1"}'],
     ["out", "hi"],
   ]);
-  vm.ws({ type: "close", id: "1", code: 1000, at: 2000 });
+  vm.ws({ type: "close", id: "1", code: 1000, at: base + 1000 });
   await new Promise((resolve) => setTimeout(resolve, 150));
   expect(session.getSnapshot().webSockets[0]).toMatchObject({
-    closedAt: 2000,
+    closedAt: base + 1000,
     closeCode: 1000,
   });
   await session.clear();
@@ -425,4 +426,16 @@ it("picks up a WebSocket that opened before Flutrace attached", async () => {
     url: "wss://x.test/live",
     total: 1,
   });
+});
+it("ignores WebSocket events replayed from before connecting", async () => {
+  const { vm, session } = setup();
+  await session.connect("unused");
+  const old = Date.now() - 10 * 60_000;
+  vm.ws({ type: "open", id: "1", url: "wss://x.test/old", at: old });
+  vm.ws({ type: "message", id: "1", url: "wss://x.test/old", at: old + 1 });
+  vm.ws({ type: "message", id: "2", url: "wss://x.test/new", at: Date.now() });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(session.getSnapshot().webSockets.map((c) => c.url)).toEqual([
+    "wss://x.test/new",
+  ]);
 });

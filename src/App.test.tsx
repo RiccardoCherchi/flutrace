@@ -308,7 +308,7 @@ it("shows a WebSocket's live messages under its handshake request, newest first"
         direction: "in",
         size: 5,
         text: "first",
-        at: 1,
+        at: Date.now() + 1,
       });
       vm.ws({
         type: "message",
@@ -316,7 +316,7 @@ it("shows a WebSocket's live messages under its handshake request, newest first"
         direction: "in",
         size: 6,
         text: "second",
-        at: 2,
+        at: Date.now() + 2,
       });
       await new Promise((resolve) => setTimeout(resolve, 150));
     });
@@ -363,14 +363,14 @@ it("holds the message list while a message is open and offers a jump to new ones
       await new Promise((resolve) => setTimeout(resolve, 150));
     });
   try {
-    await post('{"n":1}', 1);
+    await post('{"n":1}', Date.now());
     await userEvent.click(screen.getByRole("button", { name: /trades/ }));
     await userEvent.click(await screen.findByRole("tab", { name: "Messages" }));
     // Open the message: the list pauses.
     await userEvent.click(screen.getByRole("button", { expanded: false }));
     expect(screen.getByText("Paused")).toBeDefined();
-    await post('{"n":2}', 2);
-    await post('{"n":3}', 3);
+    await post('{"n":2}', Date.now());
+    await post('{"n":3}', Date.now());
     const texts = () =>
       screen
         .getAllByRole("listitem")

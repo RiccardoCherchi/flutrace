@@ -49,6 +49,8 @@ type Context = {
   active: boolean;
   revision: number;
   floor?: { startTime: number; key: string };
+  /** Wall-clock time of connecting. */
+  connectedAt: number;
 };
 const prefix = "ext.dart.io.";
 /** Completed bodies kept for search. Bounded so a long session cannot grow without limit. */
@@ -61,6 +63,8 @@ const required = [
   "httpEnableTimelineLogging",
 ];
 const socketRequired = ["getSocketProfile", "socketProfilingEnabled"];
+/** Allows for the device clock differing from this machine's. */
+const CLOCK_SLACK_MS = 60_000;
 const compare = (
   a: { startTime: number; key: string },
   b: { startTime: number; key: string },
@@ -174,6 +178,7 @@ export class CaptureSession {
       queue: Promise.resolve(),
       active: true,
       revision: 0,
+      connectedAt: Date.now(),
     };
     this.context = ctx;
     rpc.onClose = () => {
@@ -541,6 +546,9 @@ export class CaptureSession {
     };
     if (value?.extensionKind !== WS_EVENT_KIND || !value.extensionData) return;
     if (!this.snapshot.recording) return;
+    // DDS replays the stream's history to new listeners; skip what predates connecting.
+    if (Number(value.extensionData.at) < ctx.connectedAt - CLOCK_SLACK_MS)
+      return;
     this.wsPending.push({
       ctx,
       isolateId: String(value.isolate?.id ?? ""),
