@@ -2498,6 +2498,10 @@ tbody tr.pulse td:first-child {
 }
 .ws-count {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
 }
