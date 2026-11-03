@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 import { CaptureSession } from "./session.ts";
 import type { RpcTransport } from "./rpc.ts";
 
-import { Vm, request } from "../test/fake-vm.ts";
+import { Vm, request, socket } from "../test/fake-vm.ts";
 const prefix = "ext.dart.io.";
 const sessions: CaptureSession[] = [];
 function setup(vm = new Vm()) {
@@ -289,4 +289,140 @@ it("imports requests recorded before connecting only when asked", async () => {
       history ? ["old"] : [],
     );
   }
+});
+
+it("captures sockets opened after connecting and keeps their counters current", async () => {
+  const { vm, session } = setup();
+  // Real VMs use wall-clock time for the HTTP profile and the monotonic
+  // timeline clock for sockets, so socket times are far below the HTTP cursor.
+  vm.timestamp = 1_700_000_000_000_000;
+  vm.socketProfiles.set("i", [socket("old", 50)]);
+  await session.connect("unused");
+  expect(vm.socketEnabled.get("i")).toBe(true);
+  vm.socketProfiles.set("i", [
+    socket("old", 50),
+    socket("ws", 150, { readBytes: 10, writeBytes: 4 }),
+  ]);
+  await session.refresh();
+  expect(session.getSnapshot().sockets.map((row) => row.id)).toEqual(["ws"]);
+  vm.socketProfiles.set("i", [
+    socket("ws", 150, { readBytes: 900, writeBytes: 40, endTime: 400 }),
+  ]);
+  await session.refresh();
+  const [row] = session.getSnapshot().sockets;
+  expect(row).toMatchObject({ readBytes: 900, writeBytes: 40, endTime: 400 });
+  // Each poll that moved bytes adds an activity entry with the delta.
+  expect(row.activity.map(({ read, write }) => [read, write])).toEqual([
+    [10, 4],
+    [890, 36],
+  ]);
+  expect(row.lastActive).toBeTypeOf("number");
+  await session.refresh();
+  expect(session.getSnapshot().sockets[0].activity).toHaveLength(2);
+  await session.clear();
+  expect(session.getSnapshot().sockets).toEqual([]);
+  vm.socketProfiles.set("i", [
+    socket("ws", 150, { endTime: 400 }),
+    socket("after-clear", 120),
+  ]);
+  await session.refresh();
+  expect(session.getSnapshot().sockets.map((row) => row.id)).toEqual([
+    "after-clear",
+  ]);
+});
+it("normalizes numeric socket ids from older VMs", async () => {
+  const { vm, session } = setup();
+  await session.connect("unused");
+  vm.socketProfiles.set("i", [
+    { ...socket("x", 150), id: 7 as unknown as string },
+  ]);
+  await session.refresh();
+  expect(session.getSnapshot().sockets[0].id).toBe("7");
+});
+it("pauses socket profiling with recording and restores it on disconnect", async () => {
+  const { vm, session } = setup();
+  vm.isolates = ["i", "j"];
+  vm.socketEnabled.set("j", true);
+  await session.connect("unused");
+  await session.setRecording(false);
+  expect(vm.socketEnabled.get("i")).toBe(false);
+  expect(vm.socketEnabled.get("j")).toBe(true);
+  await session.setRecording(true);
+  expect(vm.socketEnabled.get("i")).toBe(true);
+  await session.disconnect();
+  expect(vm.socketEnabled.get("i")).toBe(false);
+  expect(vm.socketEnabled.get("j")).toBe(true);
+});
+it("keeps capturing HTTP when sockets are unsupported", async () => {
+  const vm = new Vm();
+  vm.socketsSupported = false;
+  const { session } = setup(vm);
+  await session.connect("unused");
+  vm.timestamp = 200;
+  vm.profiles.set("i", [request()]);
+  await session.refresh();
+  expect(session.getSnapshot().rows).toHaveLength(1);
+  expect(session.getSnapshot().sockets).toEqual([]);
+  expect(
+    vm.calls.some((call) => call.method.endsWith("getSocketProfile")),
+  ).toBe(false);
+});
+
+it("collects app-reported WebSocket messages per connection", async () => {
+  const { vm, session } = setup();
+  await session.connect("unused");
+  expect(
+    vm.calls.some(
+      (call) =>
+        call.method === "streamListen" && call.params.streamId === "Extension",
+    ),
+  ).toBe(true);
+  vm.ws({ type: "open", id: "1", url: "wss://x.test:9443/ws", at: 1000 });
+  vm.ws({
+    type: "message",
+    id: "1",
+    direction: "in",
+    size: 9,
+    text: '{"p":"1"}',
+    at: 1100,
+  });
+  vm.ws({ type: "message", id: "1", direction: "out", size: 2, text: "hi" });
+  // Unrelated extension events are ignored.
+  vm.onEvent?.("Extension", { extensionKind: "other", extensionData: {} });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const [connection] = session.getSnapshot().webSockets;
+  expect(connection).toMatchObject({
+    url: "wss://x.test:9443/ws",
+    total: 2,
+  });
+  expect(connection.messages.map((m) => [m.direction, m.text])).toEqual([
+    ["in", '{"p":"1"}'],
+    ["out", "hi"],
+  ]);
+  vm.ws({ type: "close", id: "1", code: 1000, at: 2000 });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(session.getSnapshot().webSockets[0]).toMatchObject({
+    closedAt: 2000,
+    closeCode: 1000,
+  });
+  await session.clear();
+  expect(session.getSnapshot().webSockets).toEqual([]);
+});
+it("picks up a WebSocket that opened before Flutrace attached", async () => {
+  const { vm, session } = setup();
+  await session.connect("unused");
+  // No "open" event: the app connected first. Messages carry the URL.
+  vm.ws({
+    type: "message",
+    id: "7",
+    url: "wss://x.test/live",
+    direction: "in",
+    size: 2,
+    text: "{}",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(session.getSnapshot().webSockets[0]).toMatchObject({
+    url: "wss://x.test/live",
+    total: 1,
+  });
 });

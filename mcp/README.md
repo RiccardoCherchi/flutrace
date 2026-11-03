@@ -16,7 +16,7 @@ localhost VM Service URLs. Credentials, cookies, and JWTs are redacted unless
 `FLUTRACE_MCP_SHOW_SECRETS=1` is set. `FLUTRACE_VM_URL` sets a default URL for
 `connect`.
 
-Tools: `connect`, `status`, `list_requests`, `get_request`, `search`,
-`wait_for_request`, `as_curl`, `clear`, `pause`, `resume`, `disconnect`.
+Tools: `connect`, `status`, `list_requests`, `get_request`, `list_sockets`,
+`search`, `wait_for_request`, `as_curl`, `clear`, `pause`, `resume`, `disconnect`.
 
 MIT © 2026 Riccardo

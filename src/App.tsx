@@ -10,9 +10,19 @@ import brandIcon from "../assets/flutrace-icon.png";
 import { Discovery, DiscoveryPanel } from "./components/Discovery.tsx";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { CaptureSession } from "./vm/session.ts";
-import { mimeType } from "./vm/types.ts";
+import { isWebSocketUpgrade, mimeType } from "./vm/types.ts";
+import type { WsConnection } from "./vm/types.ts";
 import { RequestTable } from "./components/RequestTable.tsx";
-import { RequestDetails, tabs } from "./components/RequestDetails.tsx";
+import { SocketTable } from "./components/SocketTable.tsx";
+import { SocketDetails } from "./components/SocketDetails.tsx";
+import {
+  connectionForRequest,
+  connectionForSocket,
+  helperSocketRows,
+  labelSockets,
+  socketAddress,
+} from "./sockets.ts";
+import { RequestDetails, tabsFor } from "./components/RequestDetails.tsx";
 import type { DetailTab } from "./components/RequestDetails.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { ContextMenu } from "./components/ContextMenu.tsx";
@@ -62,9 +72,14 @@ export default function App({
   const [url, setUrl] = useState("");
   const [filter, setFilter] = useState("");
   const [kind, setKind] = useState("All");
+  const [view, setView] = useState<"requests" | "sockets">("requests");
+  const [socketKey, setSocketKey] = useState<string>();
   const [methods, setMethods] = useState<string[]>([]);
   const [status, setStatus] = useState("all");
-  const [sort, setSort] = useState<Sort>({ column: "start", direction: "asc" });
+  const [sort, setSort] = useState<Sort>({
+    column: "start",
+    direction: "desc",
+  });
   const availableMethods = useMemo(
     () => [
       ...new Set([
@@ -184,7 +199,53 @@ export default function App({
       ),
     [state.rows, filter, kind, methods, status, sort],
   );
-  const selected = state.rows.find((row) => row.key === state.selectedKey);
+  const { socketRows, socketLabels, socketConnections } = useMemo(() => {
+    const labels = labelSockets(state.sockets, state.rows);
+    const connections = new Map<string, WsConnection>();
+    const claimed = new Set<string>();
+    for (const row of state.sockets) {
+      const connection = connectionForSocket(
+        row,
+        labels.get(row.key),
+        state.webSockets,
+      );
+      if (!connection) continue;
+      connections.set(row.key, connection);
+      claimed.add(connection.key);
+    }
+    // WebSockets opened before Flutrace attached have no profiled socket.
+    const helper = helperSocketRows(state.webSockets, claimed);
+    for (const row of helper.rows) {
+      labels.set(row.key, helper.labels.get(row.key)!);
+      const connection = state.webSockets.find((c) => c.key === row.key);
+      if (connection) connections.set(row.key, connection);
+    }
+    return {
+      // The two groups use different clocks, so each keeps its own order.
+      socketRows: [
+        ...[...helper.rows].reverse(),
+        ...[...state.sockets].reverse(),
+      ],
+      socketLabels: labels,
+      socketConnections: connections,
+    };
+  }, [state.sockets, state.rows, state.webSockets]);
+  const filteredSockets = useMemo(() => {
+    const query = filter.toLowerCase();
+    return socketRows.filter(
+      (row) =>
+        socketAddress(row).toLowerCase().includes(query) ||
+        !!socketLabels.get(row.key)?.host.toLowerCase().includes(query),
+    );
+  }, [socketRows, socketLabels, filter]);
+  const selectedSocket = socketRows.find((row) => row.key === socketKey);
+  const sockets = view === "sockets";
+  const [shown, total] = sockets
+    ? [filteredSockets.length, socketRows.length]
+    : [filtered.length, state.rows.length];
+  const selected = sockets
+    ? undefined
+    : state.rows.find((row) => row.key === state.selectedKey);
   async function action(task: () => Promise<void>) {
     setBusy(true);
     try {
@@ -308,9 +369,15 @@ export default function App({
         run: () => session.setPreserveLog(!state.preserveLog),
       },
       {
+        id: sockets ? "view-requests" : "view-sockets",
+        group: "View",
+        title: sockets ? "Show HTTP requests" : "Show sockets",
+        run: () => setView(sockets ? "requests" : "sockets"),
+      },
+      {
         id: "filter",
         group: "Filter",
-        title: "Filter by URL",
+        title: sockets ? "Filter sockets by host or address" : "Filter by URL",
         shortcut: selected ? undefined : keys("find"),
         run: () => filterInput.current?.select(),
       },
@@ -384,7 +451,7 @@ export default function App({
           title: "Copy request body",
           run: () => copy("request body", bodyText(state.detail!.request)),
         },
-      ...tabs.map(
+      ...tabsFor(!!selected && isWebSocketUpgrade(selected)).map(
         (name) =>
           selected && {
             id: `tab-${name}`,
@@ -567,12 +634,33 @@ export default function App({
           Preserve log
         </label>
         <span className="divider" />
+        <div className="segmented" role="group" aria-label="Traffic">
+          {(
+            [
+              ["requests", "HTTP"],
+              ["sockets", "Sockets"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              aria-pressed={view === id}
+              onClick={() => setView(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <span className="divider" />
         <div className="filter-field">
           <SearchIcon />
           <input
             ref={filterInput}
-            aria-label="Filter requests by URL"
-            placeholder="Filter by URL"
+            aria-label={
+              sockets ? "Filter sockets by address" : "Filter requests by URL"
+            }
+            placeholder={
+              sockets ? "Filter by host or address" : "Filter by URL"
+            }
             spellCheck={false}
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
@@ -594,11 +682,13 @@ export default function App({
           methods={availableMethods}
           selected={methods}
           onChange={setMethods}
+          disabled={sockets}
         />
         <select
           aria-label="Filter by status"
           data-active={status !== "all"}
           value={status}
+          disabled={sockets}
           onChange={(event) => setStatus(event.target.value)}
         >
           <option value="all">Any status</option>
@@ -614,6 +704,7 @@ export default function App({
             <button
               key={type}
               aria-pressed={kind === type}
+              disabled={sockets}
               onClick={() => setKind(type)}
             >
               {type}
@@ -642,13 +733,18 @@ export default function App({
             fetchDetail={(key) => session.fetchDetail(key)}
             onOpen={(key, tab, query) => {
               setBodyFind(tab === "Headers" ? "" : query);
+              setView("requests");
               setDetailTab(tab);
               void session.loadDetail(key);
             }}
             onClose={() => setSearching(false)}
           />
         )}
-        <section className="request-pane" aria-label="Network log">
+        <section
+          className="request-pane"
+          aria-label="Network log"
+          hidden={sockets}
+        >
           <RequestTable
             key={`${kind}:${filter}:${methods.join(",")}:${status}`}
             rows={filtered}
@@ -681,6 +777,46 @@ export default function App({
             />
           )}
         </section>
+        {sockets && (
+          <>
+            <section className="request-pane" aria-label="Sockets">
+              <SocketTable
+                rows={filteredSockets}
+                labels={socketLabels}
+                selectedKey={selectedSocket?.key}
+                onSelect={setSocketKey}
+              />
+              {!filteredSockets.length && (
+                <SocketEmptyState
+                  filtered={!!socketRows.length}
+                  connected={connected}
+                  recording={state.recording}
+                />
+              )}
+            </section>
+            {selectedSocket && (
+              <>
+                <Splitter
+                  workspace={workspace}
+                  width={detailWidth}
+                  onResize={setDetailWidth}
+                />
+                <SocketDetails
+                  key={selectedSocket.key}
+                  row={selectedSocket}
+                  label={socketLabels.get(selectedSocket.key)}
+                  connection={socketConnections.get(selectedSocket.key)}
+                  onClose={() => setSocketKey(undefined)}
+                  onShowRequest={(key) => {
+                    setView("requests");
+                    setDetailTab("Messages");
+                    void session.loadDetail(key);
+                  }}
+                />
+              </>
+            )}
+          </>
+        )}
         {selected && (
           <>
             <Splitter
@@ -697,16 +833,27 @@ export default function App({
               tab={detailTab}
               onTabChange={setDetailTab}
               find={bodyFind || undefined}
+              connection={
+                isWebSocketUpgrade(selected)
+                  ? connectionForRequest(selected, state.webSockets)
+                  : undefined
+              }
             />
           </>
         )}
       </main>
       <footer className="status-bar">
         <span>
-          {filtered.length === state.rows.length
-            ? state.rows.length.toLocaleString()
-            : `${filtered.length.toLocaleString()} of ${state.rows.length.toLocaleString()}`}{" "}
-          {state.rows.length === 1 ? "request" : "requests"}
+          {shown === total
+            ? total.toLocaleString()
+            : `${shown.toLocaleString()} of ${total.toLocaleString()}`}{" "}
+          {sockets
+            ? total === 1
+              ? "socket"
+              : "sockets"
+            : total === 1
+              ? "request"
+              : "requests"}
         </span>
         <span className="divider" />
         <span className="recording-state">
@@ -767,6 +914,44 @@ export default function App({
         <div className="toast" role="status">
           {notice}
         </div>
+      )}
+    </div>
+  );
+}
+
+function SocketEmptyState({
+  filtered,
+  connected,
+  recording,
+}: {
+  filtered: boolean;
+  connected: boolean;
+  recording: boolean;
+}) {
+  return (
+    <div className="empty-state">
+      {filtered ? (
+        <>
+          <FilterIcon className="empty-icon" />
+          <h1>No sockets match</h1>
+          <p>Nothing in the socket list matches the filter.</p>
+        </>
+      ) : (
+        <>
+          <PulseIcon className="empty-icon" />
+          <h1>
+            {!connected
+              ? "No sockets captured"
+              : recording
+                ? "Listening for sockets"
+                : "Recording paused"}
+          </h1>
+          <p>
+            TCP and UDP sockets the app opens after you connect appear here,
+            with the bytes read and written. WebSockets and HTTP connections
+            show up as their underlying TCP socket.
+          </p>
+        </>
       )}
     </div>
   );

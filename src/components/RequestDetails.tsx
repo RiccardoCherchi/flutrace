@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useTextFind } from "./useTextFind.ts";
-import type { Headers, RequestRow } from "../vm/types.ts";
-import { durationMs, header, mimeType } from "../vm/types.ts";
+import type { Headers, RequestRow, WsConnection } from "../vm/types.ts";
+import {
+  durationMs,
+  header,
+  isWebSocketUpgrade,
+  mimeType,
+  requestError,
+} from "../vm/types.ts";
 import type { Body, RequestDetail } from "../vm/body.ts";
 import { toCurl } from "../curl.ts";
 import { requestName } from "../request-list.ts";
@@ -12,9 +18,11 @@ import { CodeView } from "./CodeView.tsx";
 import { CheckIcon, CloseIcon, CopyIcon } from "./Icons.tsx";
 import { formatBytes, formatDuration } from "./RequestTable.tsx";
 import { bodyText, copyText } from "../clipboard.ts";
+import { WebSocketMessages, WebSocketSetupHint } from "./WebSocketMessages.tsx";
 
 export const tabs = [
   "Headers",
+  "Messages",
   "Query",
   "Payload",
   "Preview",
@@ -22,6 +30,10 @@ export const tabs = [
   "Timing",
 ] as const;
 export type DetailTab = (typeof tabs)[number];
+/** Messages applies only to WebSocket handshakes. */
+export function tabsFor(webSocket: boolean): readonly DetailTab[] {
+  return webSocket ? tabs : tabs.filter((name) => name !== "Messages");
+}
 function CopyButton({
   text,
   initialLabel,
@@ -388,6 +400,7 @@ export function RequestDetails({
   tab: controlledTab,
   onTabChange,
   find,
+  connection,
 }: {
   row: RequestRow;
   detail?: RequestDetail;
@@ -398,14 +411,20 @@ export function RequestDetails({
   onTabChange?: (tab: DetailTab) => void;
   /** Pre-fills Find in the body, e.g. when opened from global search. */
   find?: string;
+  /** Messages of the WebSocket this request opened. */
+  connection?: WsConnection;
 }) {
   const [ownTab, setOwnTab] = useState<DetailTab>("Headers");
-  const tab = controlledTab ?? ownTab;
+  const requested = controlledTab ?? ownTab;
   const setTab = onTabChange ?? setOwnTab;
   const request = detail?.metadata ?? row;
   const curl = useMemo(() => detail && toCurl(detail), [detail]);
   const duration = durationMs(request);
-  const failed = !!request.request?.error || !!request.response?.error;
+  const transportError = requestError(request);
+  const failed = !!transportError;
+  const webSocket = isWebSocketUpgrade(request);
+  const visibleTabs = tabsFor(webSocket);
+  const tab = visibleTabs.includes(requested) ? requested : "Headers";
   const statusCode = request.response?.statusCode;
   const path = useMemo(() => {
     try {
@@ -441,7 +460,7 @@ export function RequestDetails({
           role="tablist"
           aria-label="Request detail sections"
         >
-          {tabs.map((name, index) => (
+          {visibleTabs.map((name, index) => (
             <button
               key={name}
               role="tab"
@@ -462,13 +481,13 @@ export function RequestDetails({
                   event.key === "Home"
                     ? 0
                     : event.key === "End"
-                      ? tabs.length - 1
+                      ? visibleTabs.length - 1
                       : (index +
                           (event.key === "ArrowRight" ? 1 : -1) +
-                          tabs.length) %
-                        tabs.length;
-                setTab(tabs[next]);
-                document.getElementById(`tab-${tabs[next]}`)?.focus();
+                          visibleTabs.length) %
+                        visibleTabs.length;
+                setTab(visibleTabs[next]);
+                document.getElementById(`tab-${visibleTabs[next]}`)?.focus();
               }}
             >
               {name}
@@ -536,9 +555,16 @@ export function RequestDetails({
                     <dd>{row.isolateId}</dd>
                   </div>
                 </dl>
-                {failed && (
-                  <p className="request-error">
-                    {request.request?.error ?? request.response?.error}
+                {failed && <p className="request-error">{transportError}</p>}
+                {webSocket && (
+                  <p className="detail-notice">
+                    This handshake upgraded the connection to a WebSocket.{" "}
+                    <button
+                      className="text-button"
+                      onClick={() => setTab("Messages")}
+                    >
+                      Open live messages
+                    </button>
                   </p>
                 )}
               </section>
@@ -552,6 +578,12 @@ export function RequestDetails({
               />
             </>
           )}
+          {tab === "Messages" &&
+            (connection ? (
+              <WebSocketMessages key={connection.key} connection={connection} />
+            ) : (
+              <WebSocketSetupHint />
+            ))}
           {tab === "Query" && <QueryList uri={row.uri} />}
           {tab === "Payload" && (
             <BodyView

@@ -4,12 +4,17 @@ export function MethodFilter({
   methods,
   selected,
   onChange,
+  disabled = false,
 }: {
   methods: string[];
   selected: string[];
   onChange: (methods: string[]) => void;
+  disabled?: boolean;
 }) {
   const ref = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (disabled && ref.current) ref.current.open = false;
+  }, [disabled]);
   useEffect(() => {
     const closeOutside = (event: PointerEvent) => {
       if (ref.current && !ref.current.contains(event.target as Node))
@@ -22,6 +27,7 @@ export function MethodFilter({
     <details
       className="method-filter"
       data-active={selected.length > 0}
+      data-disabled={disabled || undefined}
       ref={ref}
       onKeyDown={(event) => {
         if (event.key === "Escape" && ref.current) {
@@ -30,7 +36,12 @@ export function MethodFilter({
         }
       }}
     >
-      <summary>
+      <summary
+        tabIndex={disabled ? -1 : undefined}
+        onClick={(event) => {
+          if (disabled) event.preventDefault();
+        }}
+      >
         {selected.length ? `Methods (${selected.length})` : "Methods"}
       </summary>
       <div className="method-options" aria-label="HTTP method filters">

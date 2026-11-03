@@ -1,6 +1,6 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, expect, test } from "vitest";
-import { request, Vm } from "../src/test/fake-vm.ts";
+import { request, socket, Vm } from "../src/test/fake-vm.ts";
 import { CaptureSession } from "../src/vm/session.ts";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -148,4 +148,31 @@ test("reads the app's session file only while the app is running", () => {
   // Above the macOS pid range, so no process has it.
   writeFileSync(file, JSON.stringify({ vmServiceUri: url, pid: 99999999 }));
   expect(appSessionUrl(file)).toBeUndefined();
+});
+
+test("lists sockets with byte counts and filters by state", async () => {
+  const vm = new Vm();
+  const call = await setup(vm);
+  await call("connect", { vm_url: "http://127.0.0.1:1/x=/" });
+  vm.socketProfiles.set("i", [
+    socket("a", 150, { readBytes: 300, writeBytes: 20, endTime: 2150 }),
+    socket("b", 160, { address: "10.0.0.9", port: 8080 }),
+  ]);
+  await session.refresh();
+  const all = (await call("list_sockets")).json();
+  expect(all.total).toBe(2);
+  expect(all.sockets[0]).toMatchObject({
+    address: "93.184.216.34",
+    port: 443,
+    state: "closed",
+    readBytes: 300,
+    writeBytes: 20,
+    durationMs: 2,
+  });
+  const open = (await call("list_sockets", { state: "open" })).json();
+  expect(open.sockets.map((s: { port: number }) => s.port)).toEqual([8080]);
+  expect((await call("list_sockets", { address: "10.0" })).json().total).toBe(
+    1,
+  );
+  expect((await call("status")).json().sockets).toBe(2);
 });

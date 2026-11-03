@@ -27,6 +27,8 @@ export interface RpcTransport {
   call<T>(method: string, params?: Record<string, unknown>): Promise<T>;
   close(): void;
   onClose?: () => void;
+  /** Events from streams subscribed with `streamListen`. */
+  onEvent?: (streamId: string, event: unknown) => void;
 }
 
 type Pending = {
@@ -42,6 +44,7 @@ export class RpcClient {
   private sequence = 0;
   private closed = false;
   onClose?: () => void;
+  onEvent?: (streamId: string, event: unknown) => void;
 
   private constructor(socket: WebSocket, timeoutMs: number) {
     this.socket = socket;
@@ -61,7 +64,14 @@ export class RpcClient {
           message.jsonrpc !== "2.0"
         )
           throw new Error();
-        if (!("id" in message)) return;
+        if (!("id" in message)) {
+          if (
+            message.method === "streamNotify" &&
+            typeof message.params?.streamId === "string"
+          )
+            this.onEvent?.(message.params.streamId, message.params.event);
+          return;
+        }
         const task = this.pending.get(String(message.id));
         if (!task) return;
         if (!("result" in message) && !("error" in message)) throw new Error();

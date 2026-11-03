@@ -4,13 +4,14 @@ import { toCurl } from "../src/curl.ts";
 import { matchesStatus } from "../src/request-list.ts";
 import type { Body, RequestDetail } from "../src/vm/body.ts";
 import type { CaptureSession } from "../src/vm/session.ts";
-import { durationMs, mimeType } from "../src/vm/types.ts";
+import { durationMs, mimeType, requestError } from "../src/vm/types.ts";
 import type { RequestRow } from "../src/vm/types.ts";
 import { redactHeaders, redactText } from "./redact.ts";
 
 const instructions = `Flutrace reads the HTTP traffic of a Flutter app running in debug mode, through its local Dart VM Service.
 When the Flutrace desktop app is connected to an app, the tools attach to the same VM Service automatically and include the requests it already recorded. Otherwise call connect with the VM Service URL printed by \`flutter run\` (for example http://127.0.0.1:50300/abc=/).
 Typical loop: trigger the app action, wait_for_request or list_requests, then get_request for headers, bodies, and timing.
+list_sockets shows the app's TCP and UDP sockets (including WebSockets) with bytes read and written; it has no payloads.
 Credentials, cookies, and JWTs are redacted unless the user started the server with FLUTRACE_MCP_SHOW_SECRETS=1.`;
 
 type Result = {
@@ -30,9 +31,7 @@ const done = (row: RequestRow) =>
   !!row.request?.error ||
   !!row.response?.error;
 const statusOf = (row: RequestRow) =>
-  row.request?.error || row.response?.error
-    ? "failed"
-    : (row.response?.statusCode ?? "pending");
+  requestError(row) ? "failed" : (row.response?.statusCode ?? "pending");
 
 export function createServer(
   session: CaptureSession,
@@ -173,9 +172,59 @@ export function createServer(
         status: snapshot.status,
         recording: snapshot.recording,
         requests: snapshot.rows.length,
+        sockets: snapshot.sockets.length,
         isolates: snapshot.isolateCount,
         capturing: snapshot.supportedCount,
         message: snapshot.message || undefined,
+      });
+    },
+  );
+
+  server.registerTool(
+    "list_sockets",
+    {
+      description:
+        "List TCP and UDP sockets the app opened since capture started, oldest first, with bytes read and written. WebSockets and HTTP connections appear as their underlying TCP socket. Payloads are not available.",
+      inputSchema: z.object({
+        address: z
+          .string()
+          .optional()
+          .describe(
+            "Case-insensitive substring of the remote address or port.",
+          ),
+        state: z.enum(["all", "open", "closed"]).optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      }),
+      annotations: readOnly,
+    },
+    async ({ address, state = "all", limit = 50 }) => {
+      if (!(await ready()) && !session.getSnapshot().sockets.length)
+        return notConnected();
+      const rows = session.getSnapshot().sockets.filter((row) => {
+        const open = row.endTime === undefined;
+        return (
+          (!address ||
+            `${row.address}:${row.port}`
+              .toLowerCase()
+              .includes(address.toLowerCase())) &&
+          (state === "all" || (state === "open") === open)
+        );
+      });
+      return ok({
+        total: rows.length,
+        sockets: rows.slice(-limit).map((row) => ({
+          id: row.key,
+          address: row.address,
+          port: row.port,
+          type: row.socketType,
+          state: row.endTime === undefined ? "open" : "closed",
+          readBytes: row.readBytes,
+          writeBytes: row.writeBytes,
+          durationMs:
+            row.endTime === undefined
+              ? undefined
+              : (row.endTime - row.startTime) / 1000,
+        })),
       });
     },
   );
@@ -248,7 +297,7 @@ export function createServer(
       const row = find(id)!;
       return ok({
         ...summary(row),
-        error: metadata.request?.error ?? metadata.response?.error,
+        error: requestError(metadata),
         requestHeaders: headers(metadata.request?.headers),
         responseHeaders: headers(metadata.response?.headers),
         requestBody: body(detail.request, max_body_chars),
