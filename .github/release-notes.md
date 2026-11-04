@@ -1,3 +1,8 @@
+## What's new
+
+- Live Sockets view with a WebSocket message inspector.
+- Fix shortcut recording on macOS when clicking a recorder does not focus it.
+
 ## Install on macOS
 
 Download the DMG, open it, and drag Flutrace into Applications. The universal
