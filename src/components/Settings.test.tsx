@@ -10,6 +10,27 @@ afterEach(() => {
   localStorage.clear();
 });
 
+it("records shortcuts when clicking does not focus buttons", async () => {
+  const user = userEvent.setup();
+  render(<App session={new CaptureSession()} />);
+  fireEvent.keyDown(window, { key: ",", metaKey: true });
+  const palette = screen.getByRole("button", {
+    name: "Show command palette: ⌘P",
+  });
+
+  // WebKit does not focus buttons on mouse click.
+  fireEvent.click(palette);
+  await user.keyboard("{Meta>}j{/Meta}");
+
+  expect(palette.getAttribute("aria-label")).toBe("Show command palette: ⌘J");
+  expect(JSON.parse(localStorage.getItem("flutrace.shortcuts")!).palette).toBe(
+    "Meta+KeyJ",
+  );
+  await user.click(screen.getByRole("button", { name: "Close settings" }));
+  await user.keyboard("{Meta>}j{/Meta}");
+  expect(screen.getByRole("dialog", { name: "Command palette" })).toBeDefined();
+});
+
 it("changes theme and rebinds shortcuts, and remembers both", async () => {
   const user = userEvent.setup();
   const { unmount } = render(<App session={new CaptureSession()} />);

@@ -135,7 +135,8 @@ export function Settings({
                     <button
                       className={`shortcut-recorder ${active ? "recording" : ""}`}
                       aria-label={`${action.title}: ${active ? "press a shortcut" : combo ? formatCombo(combo) : "not set"}`}
-                      onClick={() => {
+                      onClick={(event) => {
+                        event.currentTarget.focus();
                         setNote(undefined);
                         setRecording(active ? undefined : action.id);
                       }}
