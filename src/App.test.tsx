@@ -12,7 +12,7 @@ import App from "./App.tsx";
 import { CaptureSession } from "./vm/session.ts";
 import { makeDetail } from "./vm/body.ts";
 import { RequestDetails } from "./components/RequestDetails.tsx";
-import { Vm, request } from "./test/fake-vm.ts";
+import { Vm, request, socket } from "./test/fake-vm.ts";
 import { JsonTree } from "./components/JsonTree.tsx";
 
 afterEach(cleanup);
@@ -223,6 +223,208 @@ it("renders only a viewport of a large log and filters the entire log", async ()
     });
     expect(screen.getByRole("button", { name: /item-1999/ })).toBeDefined();
     expect(screen.queryByRole("button", { name: /item-1998/ })).toBeNull();
+  } finally {
+    await act(async () => {
+      await session.disconnect();
+    });
+  }
+});
+
+it("switches to a socket view with byte counts and an address filter", async () => {
+  const vm = new Vm();
+  const session = new CaptureSession({
+    connect: async () => vm,
+    intervalMs: 60000,
+  });
+  await session.connect("unused");
+  vm.socketProfiles.set("i", [
+    socket("a", 150, { readBytes: 2048, writeBytes: 12, endTime: 1150 }),
+    socket("b", 160, { address: "10.0.0.9", port: 8080 }),
+  ]);
+  await session.refresh();
+  render(<App session={session} />);
+  try {
+    await userEvent.click(screen.getByRole("button", { name: "Sockets" }));
+    expect(screen.getByText("93.184.216.34:443")).toBeDefined();
+    expect(screen.getByText("2.0 kB")).toBeDefined();
+    expect(screen.getByText("Closed")).toBeDefined();
+    expect(screen.getByText("Open")).toBeDefined();
+    expect(screen.getByText("2 sockets")).toBeDefined();
+    // HTTP-only filters stay in the toolbar, disabled, so the layout is stable.
+    expect(
+      (screen.getByLabelText("Filter by status") as HTMLSelectElement).disabled,
+    ).toBe(true);
+    await userEvent.click(screen.getByText("93.184.216.34:443"));
+    expect(screen.getByLabelText("Socket details")).toBeDefined();
+    await userEvent.click(screen.getByLabelText("Close socket details"));
+    expect(screen.queryByLabelText("Socket details")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Filter sockets by address"), {
+      target: { value: "10.0" },
+    });
+    expect(screen.queryByText("93.184.216.34:443")).toBeNull();
+    expect(screen.getByText("10.0.0.9:8080")).toBeDefined();
+    expect(screen.getByText("1 of 2 sockets")).toBeDefined();
+    await userEvent.click(screen.getByRole("button", { name: "HTTP" }));
+    expect(
+      (screen.getByLabelText("Filter by status") as HTMLSelectElement).disabled,
+    ).toBe(false);
+  } finally {
+    await act(async () => {
+      await session.disconnect();
+    });
+  }
+});
+
+it("shows a WebSocket's live messages under its handshake request, newest first", async () => {
+  const vm = new Vm();
+  const session = new CaptureSession({
+    connect: async () => vm,
+    intervalMs: 60000,
+  });
+  await session.connect("unused");
+  const handshake = {
+    ...request("ws", "i", 150),
+    uri: "https://stream.example.test:9443/ws/trades",
+    response: {
+      statusCode: 101,
+      endTime: 160,
+      error: "Socket has been detached",
+    },
+  };
+  vm.profiles.set("i", [handshake]);
+  vm.detail = handshake;
+  await session.refresh();
+  render(<App session={session} />);
+  try {
+    await act(async () => {
+      vm.ws({
+        type: "open",
+        id: "1",
+        url: "wss://stream.example.test:9443/ws/trades",
+      });
+      vm.ws({
+        type: "message",
+        id: "1",
+        direction: "in",
+        size: 5,
+        text: "first",
+        at: Date.now() + 1,
+      });
+      vm.ws({
+        type: "message",
+        id: "1",
+        direction: "in",
+        size: 6,
+        text: "second",
+        at: Date.now() + 2,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    await userEvent.click(screen.getByRole("button", { name: /trades/ }));
+    await userEvent.click(await screen.findByRole("tab", { name: "Messages" }));
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent);
+    expect(items[0]).toContain("second");
+    expect(items[1]).toContain("first");
+    expect(screen.getByText("2 messages")).toBeDefined();
+  } finally {
+    await act(async () => {
+      await session.disconnect();
+    });
+  }
+});
+
+it("holds the message list while a message is open and offers a jump to new ones", async () => {
+  const vm = new Vm();
+  const session = new CaptureSession({
+    connect: async () => vm,
+    intervalMs: 60000,
+  });
+  await session.connect("unused");
+  const handshake = {
+    ...request("ws", "i", 150),
+    uri: "https://stream.example.test:9443/ws/trades",
+    response: { statusCode: 101, endTime: 160 },
+  };
+  vm.profiles.set("i", [handshake]);
+  vm.detail = handshake;
+  await session.refresh();
+  render(<App session={session} />);
+  const post = async (text: string, at: number) =>
+    act(async () => {
+      vm.ws({
+        type: "message",
+        id: "1",
+        url: "wss://stream.example.test:9443/ws/trades",
+        direction: "in",
+        size: text.length,
+        text,
+        at,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+  try {
+    await post('{"n":1}', Date.now());
+    await userEvent.click(screen.getByRole("button", { name: /trades/ }));
+    await userEvent.click(await screen.findByRole("tab", { name: "Messages" }));
+    // Open the message: the list pauses.
+    await userEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByText("Paused")).toBeDefined();
+    await post('{"n":2}', Date.now());
+    await post('{"n":3}', Date.now());
+    const texts = () =>
+      screen
+        .getAllByRole("listitem")
+        .map((item) => item.querySelector(".ws-text")?.textContent);
+    expect(texts()).toEqual(['{"n":1}']);
+    expect(screen.getByText("3 messages")).toBeDefined();
+    await userEvent.click(
+      screen.getByRole("button", { name: /2 new messages/ }),
+    );
+    expect(texts()).toEqual(['{"n":3}', '{"n":2}', '{"n":1}']);
+    expect(screen.getByText("Live")).toBeDefined();
+  } finally {
+    await act(async () => {
+      await session.disconnect();
+    });
+  }
+});
+
+it("keeps an open request in place when newer requests arrive", async () => {
+  const vm = new Vm();
+  const session = new CaptureSession({
+    connect: async () => vm,
+    intervalMs: 60000,
+  });
+  await session.connect("unused");
+  vm.timestamp = 200;
+  vm.profiles.set("i", [
+    { ...request("a", "i", 101), uri: "https://example.test/first" },
+  ]);
+  await session.refresh();
+  render(<App session={session} />);
+  try {
+    // Oldest first is the default; switch to newest first.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Sort by Waterfall" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /first/ }));
+    expect(screen.queryByRole("button", { name: /new request/ })).toBeNull();
+    vm.profiles.set("i", [
+      { ...request("b", "i", 150), uri: "https://example.test/second" },
+    ]);
+    await act(async () => {
+      await session.refresh();
+    });
+    // Newest first: the new request is on top, and the open one is held.
+    const names = screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => row.querySelector(".label")?.textContent);
+    expect(names).toEqual(["second", "first"]);
+    await userEvent.click(
+      screen.getByRole("button", { name: "↑ 1 new request" }),
+    );
+    expect(screen.queryByRole("button", { name: /new request/ })).toBeNull();
   } finally {
     await act(async () => {
       await session.disconnect();

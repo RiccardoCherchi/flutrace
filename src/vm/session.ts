@@ -1,6 +1,15 @@
 import { RpcClient } from "./rpc.ts";
 import type { RpcTransport } from "./rpc.ts";
-import type { HttpRequest, Profile, RequestRow } from "./types.ts";
+import type {
+  HttpRequest,
+  Profile,
+  RequestRow,
+  SocketProfile,
+  SocketRow,
+  WsConnection,
+  WsMessage,
+} from "./types.ts";
+import { ACTIVITY_LIMIT, WS_EVENT_KIND, WS_MESSAGE_LIMIT } from "./types.ts";
 import { BODY_LIMIT, makeDetail } from "./body.ts";
 import type { RequestDetail } from "./body.ts";
 
@@ -9,6 +18,8 @@ export type Snapshot = {
   recording: boolean;
   preserveLog: boolean;
   rows: RequestRow[];
+  sockets: SocketRow[];
+  webSockets: WsConnection[];
   isolateCount: number;
   supportedCount: number;
   message: string;
@@ -23,6 +34,11 @@ type Isolate = {
   enableKey: string;
   cursor: number;
   cutoff: number;
+  sockets?: {
+    original: boolean;
+    on: boolean;
+    known: Set<string>;
+  };
 };
 type Context = {
   id: number;
@@ -33,6 +49,10 @@ type Context = {
   active: boolean;
   revision: number;
   floor?: { startTime: number; key: string };
+  /** Sockets at or before this were evicted and are not rebuilt. */
+  socketFloor?: { startTime: number; key: string };
+  /** Wall-clock time of connecting. */
+  connectedAt: number;
 };
 const prefix = "ext.dart.io.";
 /** Completed bodies kept for search. Bounded so a long session cannot grow without limit. */
@@ -44,6 +64,9 @@ const required = [
   "getHttpProfileRequest",
   "httpEnableTimelineLogging",
 ];
+const socketRequired = ["getSocketProfile", "socketProfilingEnabled"];
+/** Allows for the device clock differing from this machine's. */
+const CLOCK_SLACK_MS = 60_000;
 const compare = (
   a: { startTime: number; key: string },
   b: { startTime: number; key: string },
@@ -55,6 +78,8 @@ export class CaptureSession {
     recording: true,
     preserveLog: false,
     rows: [],
+    sockets: [],
+    webSockets: [],
     isolateCount: 0,
     supportedCount: 0,
     message: "",
@@ -70,6 +95,12 @@ export class CaptureSession {
   private intervalMs: number;
   private history: boolean;
   private closing?: Promise<void>;
+  private wsPending: {
+    ctx: Context;
+    isolateId: string;
+    data: Record<string, unknown>;
+  }[] = [];
+  private wsTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     options: {
@@ -117,6 +148,8 @@ export class CaptureSession {
       detailLoading: false,
       detailError: undefined,
       rows: this.snapshot.preserveLog ? this.snapshot.rows : [],
+      sockets: this.snapshot.preserveLog ? this.snapshot.sockets : [],
+      webSockets: this.snapshot.preserveLog ? this.snapshot.webSockets : [],
     });
     if (!this.snapshot.preserveLog) this.clearCache();
     let rpc: RpcTransport;
@@ -147,6 +180,7 @@ export class CaptureSession {
       queue: Promise.resolve(),
       active: true,
       revision: 0,
+      connectedAt: Date.now(),
     };
     this.context = ctx;
     rpc.onClose = () => {
@@ -162,6 +196,13 @@ export class CaptureSession {
           "Connection lost. Reconnect with the current VM URL. Profiling could not be restored.",
       });
     };
+    rpc.onEvent = (streamId, event) => {
+      if (streamId === "Extension" && this.live(ctx))
+        this.onExtension(ctx, event);
+    };
+    // The Flutrace WebSocket helper posts to the Extension stream.
+    await rpc.call("streamListen", { streamId: "Extension" }).catch(() => {});
+    if (!this.live(ctx)) return;
     this.emit({ status: "connected" });
     await this.refresh();
     this.schedule(ctx);
@@ -216,6 +257,8 @@ export class CaptureSession {
       ++this.detailVersion;
       this.emit({
         rows: [],
+        sockets: [],
+        webSockets: [],
         selectedKey: undefined,
         detail: undefined,
         detailError: undefined,
@@ -225,6 +268,7 @@ export class CaptureSession {
         const baseline = await this.profile(ctx, id);
         state.cutoff = baseline.timestamp;
         state.cursor = baseline.timestamp;
+        await this.socketBaseline(ctx, id, state);
       }
     }
     let failed = false;
@@ -254,7 +298,7 @@ export class CaptureSession {
         if (typeof original.enabled !== "boolean")
           throw new Error("Invalid profiling state");
         const start = this.history ? 0 : baseline.timestamp;
-        const state = {
+        const state: Isolate = {
           original: original.enabled,
           profilingOn: original.enabled,
           enableKey:
@@ -262,6 +306,28 @@ export class CaptureSession {
           cursor: start,
           cutoff: start,
         };
+        if (
+          socketRequired.every((name) =>
+            isolate.extensionRPCs?.includes(prefix + name),
+          )
+        ) {
+          // Socket capture is optional: HTTP keeps working without it.
+          try {
+            const sockets = await ctx.rpc.call<{ enabled: boolean }>(
+              prefix + "socketProfilingEnabled",
+              { isolateId },
+            );
+            if (typeof sockets.enabled === "boolean")
+              state.sockets = {
+                original: sockets.enabled,
+                on: sockets.enabled,
+                known: new Set(),
+              };
+            if (!this.history) await this.socketBaseline(ctx, isolateId, state);
+          } catch {
+            /* Leave sockets off for this isolate. */
+          }
+        }
         ctx.isolates.set(isolateId, state);
       } catch {
         failed = true;
@@ -273,6 +339,17 @@ export class CaptureSession {
       if (state.profilingOn !== desired) {
         try {
           await this.toggle(ctx, id, state, desired);
+        } catch {
+          failed = true;
+        }
+      }
+      const sockets = state.sockets;
+      if (
+        sockets &&
+        sockets.on !== (sockets.original || this.snapshot.recording)
+      ) {
+        try {
+          await this.toggleSockets(ctx, id, state, !sockets.on);
         } catch {
           failed = true;
         }
@@ -331,11 +408,12 @@ export class CaptureSession {
           });
       }
     }
+    const sockets = await this.pollSockets(ctx);
     if (!this.live(ctx) || revision !== ctx.revision) return;
     const sorted = [...rows.values()].sort(compare);
     if (sorted.length > 2000) ctx.floor = sorted[sorted.length - 2001];
     const retained = sorted.slice(-2000);
-    this.emit({ rows: retained });
+    this.emit({ rows: retained, sockets });
     const selected = retained.find(
       (row) => row.key === this.snapshot.selectedKey,
     );
@@ -370,6 +448,229 @@ export class CaptureSession {
     state.profilingOn = enabled;
   }
 
+  private async toggleSockets(
+    ctx: Context,
+    isolateId: string,
+    state: Isolate,
+    enabled: boolean,
+  ) {
+    if (!state.sockets) return;
+    const result = await ctx.rpc.call<{ enabled: boolean }>(
+      prefix + "socketProfilingEnabled",
+      { isolateId, enabled: String(enabled) },
+    );
+    if (result.enabled !== enabled)
+      throw new Error("Socket profiling state was not applied");
+    state.sockets.on = enabled;
+  }
+
+  /** Marks the sockets already in the profile as seen. */
+  private async socketBaseline(
+    ctx: Context,
+    isolateId: string,
+    state: Isolate,
+  ) {
+    if (!state.sockets) return;
+    try {
+      const profile = await ctx.rpc.call<SocketProfile>(
+        prefix + "getSocketProfile",
+        { isolateId },
+      );
+      if (Array.isArray(profile?.sockets))
+        state.sockets.known = new Set(
+          profile.sockets.map((socket) => String(socket?.id)),
+        );
+    } catch {
+      /* Keep the previous boundary. */
+    }
+  }
+
+  /** The VM has no cursor for sockets, so each poll reads the full profile. */
+  private async pollSockets(ctx: Context): Promise<SocketRow[]> {
+    const now = Date.now();
+    const rows = new Map(this.snapshot.sockets.map((row) => [row.key, row]));
+    for (const [isolateId, state] of ctx.isolates) {
+      if (!state.sockets?.on || !this.live(ctx)) continue;
+      try {
+        const profile = await ctx.rpc.call<SocketProfile>(
+          prefix + "getSocketProfile",
+          { isolateId },
+        );
+        if (!Array.isArray(profile?.sockets)) continue;
+        for (const raw of profile.sockets) {
+          if (
+            !raw ||
+            (typeof raw.id !== "string" && typeof raw.id !== "number") ||
+            !Number.isSafeInteger(raw.startTime)
+          )
+            continue;
+          // Older VMs report numeric ids.
+          const key = `${ctx.id}:${isolateId}:${String(raw.id)}`;
+          if (state.sockets.known.has(String(raw.id)) && !rows.has(key))
+            continue;
+          if (
+            !rows.has(key) &&
+            ctx.socketFloor &&
+            compare({ startTime: raw.startTime, key }, ctx.socketFloor) <= 0
+          )
+            continue;
+          const previous = rows.get(key);
+          const readBytes = Number(raw.readBytes) || 0;
+          const writeBytes = Number(raw.writeBytes) || 0;
+          const read = Math.max(0, readBytes - (previous?.readBytes ?? 0));
+          const write = Math.max(0, writeBytes - (previous?.writeBytes ?? 0));
+          const moved = read > 0 || write > 0;
+          let activity = previous?.activity ?? [];
+          if (moved) {
+            activity = [...activity, { at: now, read, write }];
+            if (activity.length > ACTIVITY_LIMIT)
+              activity = activity.slice(-ACTIVITY_LIMIT);
+          }
+          rows.set(key, {
+            ...raw,
+            id: String(raw.id),
+            address: String(raw.address ?? ""),
+            socketType: String(raw.socketType ?? "tcp"),
+            readBytes,
+            writeBytes,
+            key,
+            isolateId,
+            session: ctx.id,
+            activity,
+            lastActive: moved ? now : previous?.lastActive,
+          });
+        }
+      } catch {
+        /* Keep the previous socket rows. */
+      }
+    }
+    const sorted = [...rows.values()].sort(compare);
+    if (sorted.length > 2000) ctx.socketFloor = sorted[sorted.length - 2001];
+    return sorted.slice(-2000);
+  }
+
+  private onExtension(ctx: Context, event: unknown) {
+    const value = event as {
+      extensionKind?: string;
+      extensionData?: Record<string, unknown>;
+      isolate?: { id?: string };
+    };
+    if (value?.extensionKind !== WS_EVENT_KIND || !value.extensionData) return;
+    // A close still applies while paused, or the connection would look open forever.
+    if (!this.snapshot.recording && value.extensionData.type !== "close")
+      return;
+    // DDS replays the stream's history to new listeners; skip what predates connecting.
+    if (Number(value.extensionData.at) < ctx.connectedAt - CLOCK_SLACK_MS)
+      return;
+    this.wsPending.push({
+      ctx,
+      isolateId: String(value.isolate?.id ?? ""),
+      data: value.extensionData,
+    });
+    // One update per burst keeps fast streams smooth.
+    this.wsTimer ??= setTimeout(() => this.flushWebSockets(), 100);
+  }
+
+  private flushWebSockets() {
+    this.wsTimer = undefined;
+    const pending = this.wsPending.splice(0);
+    const byKey = new Map(this.snapshot.webSockets.map((c) => [c.key, c]));
+    // Connections already copied in this flush, so a burst mutates one copy.
+    const copied = new Set<string>();
+    let changed = false;
+    for (const { ctx, isolateId, data } of pending) {
+      if (!this.live(ctx)) continue;
+      const id = String(data.id ?? "");
+      if (!id) continue;
+      const key = `${ctx.id}:${isolateId}:ws:${id}`;
+      const at = Number(data.at) || Date.now();
+      let connection = byKey.get(key);
+      if (data.type === "open" || !connection) {
+        if (data.type !== "open" && data.type !== "message") continue;
+        if (!connection) {
+          connection = {
+            key,
+            id,
+            isolateId,
+            session: ctx.id,
+            url: String(data.url ?? ""),
+            openedAt: at,
+            messages: [],
+            total: 0,
+            bytesIn: 0,
+            bytesOut: 0,
+            activity: [],
+          };
+          copied.add(key);
+        }
+        if (data.type === "open") {
+          byKey.set(key, connection);
+          changed = true;
+          continue;
+        }
+      }
+      if (data.type !== "message" && data.type !== "close") continue;
+      if (!copied.has(key)) {
+        connection = {
+          ...connection,
+          messages: [...connection.messages],
+          activity: [...connection.activity],
+        };
+        copied.add(key);
+      }
+      if (data.type === "message") {
+        const message: WsMessage = {
+          seq: connection.total,
+          at,
+          direction: data.direction === "out" ? "out" : "in",
+          size: Number(data.size) || 0,
+          text: typeof data.text === "string" ? data.text : undefined,
+          binary: data.binary === true,
+          truncated: data.truncated === true,
+        };
+        connection.messages.push(message);
+        if (connection.messages.length > WS_MESSAGE_LIMIT)
+          connection.messages.shift();
+        connection.total += 1;
+        if (message.direction === "in") connection.bytesIn += message.size;
+        else connection.bytesOut += message.size;
+        const second = Math.floor(at / 1000) * 1000;
+        const last = connection.activity[connection.activity.length - 1];
+        if (last?.at === second) {
+          // Replace the entry: the previous snapshot may still share it.
+          connection.activity[connection.activity.length - 1] = {
+            at: second,
+            read: last.read + (message.direction === "in" ? message.size : 0),
+            write:
+              last.write + (message.direction === "out" ? message.size : 0),
+          };
+        } else {
+          connection.activity.push({
+            at: second,
+            read: message.direction === "in" ? message.size : 0,
+            write: message.direction === "out" ? message.size : 0,
+          });
+          if (connection.activity.length > ACTIVITY_LIMIT)
+            connection.activity.shift();
+        }
+        connection.lastActive = at;
+      } else {
+        connection.closedAt = at;
+        connection.closeCode = Number.isInteger(data.code)
+          ? Number(data.code)
+          : undefined;
+      }
+      byKey.set(key, connection);
+      changed = true;
+    }
+    if (changed)
+      this.emit({
+        webSockets: [...byKey.values()]
+          .sort((a, b) => a.openedAt - b.openedAt)
+          .slice(-200),
+      });
+  }
+
   async setRecording(recording: boolean) {
     const ctx = this.context;
     if (!ctx) return;
@@ -382,8 +683,11 @@ export class CaptureSession {
             const baseline = await this.profile(ctx, id);
             state.cutoff = baseline.timestamp;
             state.cursor = baseline.timestamp;
+            await this.socketBaseline(ctx, id, state);
           }
           if (!state.original) await this.toggle(ctx, id, state, recording);
+          if (state.sockets && !state.sockets.original)
+            await this.toggleSockets(ctx, id, state, recording);
         } catch {
           failed = true;
         }
@@ -400,9 +704,13 @@ export class CaptureSession {
 
   async clear() {
     ++this.detailVersion;
+    // Messages queued before Clear must not reappear after it.
+    this.wsPending.length = 0;
     this.clearCache();
     this.emit({
       rows: [],
+      sockets: [],
+      webSockets: [],
       selectedKey: undefined,
       detail: undefined,
       detailLoading: false,
@@ -418,6 +726,7 @@ export class CaptureSession {
           const profile = await this.profile(ctx, id);
           state.cutoff = profile.timestamp;
           state.cursor = profile.timestamp;
+          await this.socketBaseline(ctx, id, state);
         } catch {
           failed = true;
           state.cutoff = Number.MAX_SAFE_INTEGER;
@@ -426,6 +735,8 @@ export class CaptureSession {
       if (this.live(ctx))
         this.emit({
           rows: [],
+          sockets: [],
+          webSockets: [],
           message: failed
             ? "Could not establish a clear boundary. Reconnect to resume capture."
             : "",
@@ -555,9 +866,10 @@ export class CaptureSession {
       await ctx.queue;
       let failed = false;
       for (const [id, state] of ctx.isolates) {
-        if (state.original) continue;
         try {
-          await this.toggle(ctx, id, state, false);
+          if (!state.original) await this.toggle(ctx, id, state, false);
+          if (state.sockets && !state.sockets.original && state.sockets.on)
+            await this.toggleSockets(ctx, id, state, false);
         } catch {
           failed = true;
         }

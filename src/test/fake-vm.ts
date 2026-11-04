@@ -1,5 +1,5 @@
 import type { RpcTransport } from "../vm/rpc.ts";
-import type { HttpRequest } from "../vm/types.ts";
+import type { HttpRequest, SocketStatistic } from "../vm/types.ts";
 
 const prefix = "ext.dart.io.";
 export function request(
@@ -21,15 +21,44 @@ export function request(
     },
   };
 }
+export function socket(
+  id = "s",
+  startTime = 101,
+  extra: Partial<SocketStatistic> = {},
+): SocketStatistic {
+  return {
+    id,
+    startTime,
+    address: "93.184.216.34",
+    port: 443,
+    socketType: "tcp",
+    readBytes: 0,
+    writeBytes: 0,
+    ...extra,
+  };
+}
 export class Vm implements RpcTransport {
   isolates = ["i"];
   supported = true;
+  socketsSupported = true;
+  socketEnabled = new Map<string, boolean>();
+  socketProfiles = new Map<string, SocketStatistic[]>();
   enabled = new Map<string, boolean>();
   profiles = new Map<string, HttpRequest[]>();
   timestamp = 100;
   calls: { method: string; params: Record<string, unknown> }[] = [];
   closed = false;
   onClose?: () => void;
+  onEvent?: (streamId: string, event: unknown) => void;
+  /** Posts a `flutrace.ws` event as the app helper would. */
+  ws(data: Record<string, unknown>, isolateId = "i") {
+    this.onEvent?.("Extension", {
+      kind: "Extension",
+      extensionKind: "flutrace.ws",
+      extensionData: data,
+      isolate: { id: isolateId },
+    });
+  }
   detail: HttpRequest = { ...request(), responseBody: [123, 125] };
   async call<T>(
     method: string,
@@ -38,7 +67,8 @@ export class Vm implements RpcTransport {
     this.calls.push({ method, params });
     const isolate = String(params.isolateId);
     let result: unknown;
-    if (method === "getVM")
+    if (method === "streamListen") result = { type: "Success" };
+    else if (method === "getVM")
       result = { isolates: this.isolates.map((id) => ({ id })) };
     else if (method === "getIsolate")
       result = {
@@ -47,6 +77,9 @@ export class Vm implements RpcTransport {
               "getHttpProfile",
               "getHttpProfileRequest",
               "httpEnableTimelineLogging",
+              ...(this.socketsSupported
+                ? ["getSocketProfile", "socketProfilingEnabled"]
+                : []),
             ].map((name) => prefix + name)
           : [],
       };
@@ -61,6 +94,12 @@ export class Vm implements RpcTransport {
         requests: this.profiles.get(isolate) ?? [],
       };
     else if (method === prefix + "getHttpProfileRequest") result = this.detail;
+    else if (method === prefix + "socketProfilingEnabled") {
+      if ("enabled" in params)
+        this.socketEnabled.set(isolate, params.enabled === "true");
+      result = { enabled: this.socketEnabled.get(isolate) ?? false };
+    } else if (method === prefix + "getSocketProfile")
+      result = { sockets: this.socketProfiles.get(isolate) ?? [] };
     else throw new Error("Unexpected RPC");
     return result as T;
   }

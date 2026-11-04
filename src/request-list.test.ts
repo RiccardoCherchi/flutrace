@@ -47,3 +47,27 @@ it("sorts names and durations and recognizes status filters", () => {
   ).toBe(true);
   expect(matchesStatus(row("pending"), "failed")).toBe(false);
 });
+
+it("treats a WebSocket upgrade's detached socket as success, not a failure", () => {
+  const upgrade = {
+    key: "ws",
+    id: "ws",
+    isolateId: "i",
+    session: 1,
+    method: "GET",
+    uri: "https://stream.example.test:9443/ws",
+    startTime: 1,
+    response: {
+      statusCode: 101,
+      endTime: 2,
+      error: "Socket has been detached",
+    },
+  };
+  expect(matchesStatus(upgrade, "failed")).toBe(false);
+  expect(matchesStatus(upgrade, "pending")).toBe(false);
+  const broken = {
+    ...upgrade,
+    response: { statusCode: 200, error: "Socket has been detached" },
+  };
+  expect(matchesStatus(broken, "failed")).toBe(true);
+});

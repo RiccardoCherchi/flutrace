@@ -1,4 +1,4 @@
-import { durationMs, mimeType } from "./vm/types.ts";
+import { durationMs, mimeType, requestError } from "./vm/types.ts";
 import type { RequestRow } from "./vm/types.ts";
 
 export type SortColumn =
@@ -62,7 +62,7 @@ export function sortRequests(rows: RequestRow[], sort: Sort): RequestRow[] {
   });
 }
 export function matchesStatus(row: RequestRow, status: string): boolean {
-  const error = !!row.request?.error || !!row.response?.error;
+  const error = !!requestError(row);
   if (status === "all") return true;
   if (status === "failed")
     return error || (row.response?.statusCode ?? 0) >= 400;

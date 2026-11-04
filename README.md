@@ -62,6 +62,13 @@ Stopping and relaunching the app may change its URL; reconnect if that happens.
   100 per branch, and 20 levels; deeper JSON remains available in Response.
 - Click a JWT in a header, URL, payload, or response to decode its header and
   claims locally. This does not verify its signature or decrypt JWE tokens.
+- Switch to **Sockets** to watch TCP and UDP sockets live: bytes read and
+  written, throughput, and recent activity. WebSockets are marked **WS**.
+- Watch WebSocket messages live in the handshake request's **Messages** tab or
+  the socket's details. This needs [one line in your app](#websocket-messages).
+  Opening a message or scrolling down holds the list in place.
+- New requests appear at the top; click the Waterfall heading to flip the
+  order.
 - Pause capture, clear the local log, preserve it across reconnects, or copy a
   request URL or cURL command. cURL includes captured headers and body; it is
   available once the complete request body has loaded. Copy buttons briefly
@@ -79,12 +86,26 @@ Stopping and relaunching the app may change its URL; reconnect if that happens.
 - Resize the details pane by dragging its edge or using the arrow keys. Its
   width is remembered.
 
+## WebSocket messages
+
+The Dart VM keeps no WebSocket messages, so the app reports them. Copy
+[`dart/flutrace_ws.dart`](dart/flutrace_ws.dart) into your app and wrap the
+socket:
+
+```dart
+final socket = traceWebSocket(await WebSocket.connect(url), url);
+```
+
+The helper does nothing in release builds. Flutrace keeps the last 1,000
+messages per connection.
+
 ## What it can capture
 
 Flutrace reads the HTTP profiling data exposed by the VM. That includes
 `dart:io` HttpClient, standard Dio traffic using that client, and clients that
 publish compatible `http_profile` data. Native SDK traffic is not automatically
-visible. Flutter web and normal release builds are unsupported.
+visible. Flutter web and normal release builds are unsupported. The Sockets
+view shows `dart:io` socket statistics: byte counts, not payloads.
 
 An image served from the app's cache may never produce a network request.
 A `304 Not Modified` response has no image body to preview; Flutrace does not
@@ -137,8 +158,8 @@ If the Flutrace app is connected to your Flutter app, the agent attaches to the
 same session on its own and also sees the requests already recorded. Otherwise
 ask it to connect with the VM Service URL from `flutter run`. Then ask it what a
 screen sends or why a call fails. The tools are `connect`,
-`status`, `list_requests`, `get_request`, `search`, `wait_for_request`,
-`as_curl`, `clear`, `pause`, `resume`, and `disconnect`.
+`status`, `list_requests`, `get_request`, `list_sockets`, `search`,
+`wait_for_request`, `as_curl`, `clear`, `pause`, `resume`, and `disconnect`.
 
 Captured data goes into the agent's context, so the server hides credentials by
 default: sensitive headers (Authorization, cookies, tokens, API keys), JWTs, and

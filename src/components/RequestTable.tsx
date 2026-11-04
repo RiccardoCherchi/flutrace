@@ -1,5 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { durationMs, mimeType } from "../vm/types.ts";
+import {
+  durationMs,
+  isWebSocketUpgrade,
+  mimeType,
+  requestError,
+} from "../vm/types.ts";
 import { requestLocation, requestName } from "../request-list.ts";
 import { DocumentIcon, FailedIcon, ImageIcon, JsonIcon } from "./Icons.tsx";
 import type { Sort, SortColumn } from "../request-list.ts";
@@ -20,7 +25,21 @@ function formatSpan(microseconds: number) {
   const ms = microseconds / 1000;
   return ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
-const ROW_HEIGHT = 26;
+export const ROW_HEIGHT = 26;
+/** The slice of rows to render for a scroll position, with overscan. */
+export function visibleRange(top: number, height: number, count: number) {
+  const start = Math.max(
+    0,
+    Math.min(
+      Math.max(0, count - 1),
+      Math.floor((top - ROW_HEIGHT) / ROW_HEIGHT) - 5,
+    ),
+  );
+  return {
+    start,
+    end: Math.min(count, start + Math.ceil(height / ROW_HEIGHT) + 12),
+  };
+}
 export function RequestTable({
   rows,
   sort,
@@ -53,22 +72,29 @@ export function RequestTable({
   // Like DevTools: while the list is scrolled to the end, keep new requests in view.
   const following = useRef(true);
   const newestLast = sort.column === "start" && sort.direction === "asc";
+  const newestFirst = sort.column === "start" && sort.direction === "desc";
   useLayoutEffect(() => {
     const element = scroll.current;
-    if (element && newestLast && following.current)
+    if (element && newestLast && following.current && !selectedKey)
       element.scrollTop = element.scrollHeight;
-  }, [rows.length, newestLast]);
-  const start = Math.max(
-    0,
-    Math.min(
-      Math.max(0, rows.length - 1),
-      Math.floor((top - ROW_HEIGHT) / ROW_HEIGHT) - 5,
-    ),
-  );
-  const end = Math.min(
-    rows.length,
-    start + Math.ceil(height / ROW_HEIGHT) + 12,
-  );
+  }, [rows.length, newestLast, selectedKey]);
+  // WebKit has no scroll anchoring: hold an open request in place when newer ones arrive above.
+  const firstKey = useRef<string | undefined>(undefined);
+  const [added, setAdded] = useState(0);
+  useLayoutEffect(() => {
+    const previous = firstKey.current;
+    firstKey.current = rows[0]?.key;
+    const element = scroll.current;
+    if (!element || !newestFirst || !previous) return;
+    const inserted = rows.findIndex((row) => row.key === previous);
+    if (inserted <= 0) return;
+    if (element.scrollTop > ROW_HEIGHT / 2 || selectedKey) {
+      element.scrollTop += inserted * ROW_HEIGHT;
+      setTop(element.scrollTop);
+      setAdded((count) => count + inserted);
+    }
+  }, [rows, newestFirst, selectedKey]);
+  const { start, end } = visibleRange(top, height, rows.length);
   const origin = rows.reduce(
     (earliest, row) => Math.min(earliest, row.startTime),
     rows[0]?.startTime ?? 0,
@@ -88,6 +114,7 @@ export function RequestTable({
         following.current =
           element.scrollTop + element.clientHeight >=
           element.scrollHeight - ROW_HEIGHT;
+        if (element.scrollTop <= 2) setAdded(0);
         setTop(element.scrollTop);
       }}
       onKeyDown={(event) => {
@@ -136,6 +163,18 @@ export function RequestTable({
       role="region"
       aria-label="Captured requests"
     >
+      {added > 0 && (
+        <button
+          className="new-items-pill"
+          onClick={() => {
+            if (scroll.current) scroll.current.scrollTop = 0;
+            setTop(0);
+            setAdded(0);
+          }}
+        >
+          ↑ {added.toLocaleString()} new {added === 1 ? "request" : "requests"}
+        </button>
+      )}
       <table aria-rowcount={rows.length + 1}>
         <colgroup>
           <col className="name-col" />
@@ -222,7 +261,8 @@ export function RequestTable({
             const mime = mimeType(row);
             const image = mime.startsWith("image/");
             const json = mime.includes("json");
-            const failed = !!row.request?.error || !!row.response?.error;
+            const failed = !!requestError(row);
+            const webSocket = isWebSocketUpgrade(row);
             const statusCode = row.response?.statusCode;
             const error = failed || (statusCode ?? 0) >= 400;
             const duration = durationMs(row);
@@ -281,8 +321,10 @@ export function RequestTable({
                   </span>
                 </td>
                 <td className="muted" title={mime}>
-                  {mime.replace("application/", "").replace("image/", "") ||
-                    "—"}
+                  {webSocket
+                    ? "websocket"
+                    : mime.replace("application/", "").replace("image/", "") ||
+                      "—"}
                 </td>
                 <td className="num muted">
                   {formatBytes(row.response?.contentLength)}

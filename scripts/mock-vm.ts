@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { WebSocketServer } from "ws";
-import type { HttpRequest } from "../src/vm/types.ts";
+import type { HttpRequest, SocketStatistic } from "../src/vm/types.ts";
 
 const server = new WebSocketServer({ host: "127.0.0.1", port: 8189 });
 const image = [
@@ -9,6 +9,8 @@ const image = [
 let isolateId = "isolates/1";
 let enabled = false;
 let requests: HttpRequest[] = [];
+let socketsEnabled = false;
+let sockets: SocketStatistic[] = [];
 let revision = 1;
 const encode = (value: unknown) => [
   ...new TextEncoder().encode(
@@ -175,6 +177,38 @@ const fixtures: Fixture[] = [
   },
   { url: "https://api.shop.example/v2/inventory/1842", at: 1890 },
 ];
+function populateSockets() {
+  // Like the VM, socket times use a monotonic clock.
+  const start = Math.round(performance.now() * 1000);
+  const tcp = (
+    id: number,
+    address: string,
+    at: number,
+    ms: number | undefined,
+    readBytes: number,
+    writeBytes: number,
+  ): SocketStatistic => ({
+    id: String(id),
+    address,
+    port: 443,
+    socketType: "tcp",
+    startTime: start + at * 1000,
+    ...(ms !== undefined && { endTime: start + (at + ms) * 1000 }),
+    readBytes,
+    writeBytes,
+  });
+  sockets = [
+    tcp(1, "203.0.113.10", 0, 4200, 18_342, 2_904),
+    tcp(2, "203.0.113.24", 40, 2100, 1_204, 688),
+    tcp(3, "198.51.100.7", 650, 1800, 96_420, 1_120),
+    tcp(4, "203.0.113.42", 900, undefined, 512, 340),
+    {
+      ...tcp(5, "2001:db8::53", 20, 31, 92, 46),
+      port: 53,
+      socketType: "udp",
+    },
+  ];
+}
 function populate() {
   const start = Date.now() * 1000;
   requests = fixtures.map((fixture, index) => {
@@ -270,6 +304,8 @@ server.on("connection", (socket) =>
             "httpEnableTimelineLogging",
             "getHttpProfile",
             "getHttpProfileRequest",
+            "getSocketProfile",
+            "socketProfilingEnabled",
           ].map((name) => `ext.dart.io.${name}`),
         };
         break;
@@ -291,6 +327,17 @@ server.on("connection", (socket) =>
             ({ requestBody: _a, responseBody: _b, ...ref }) => ref,
           ),
         };
+        break;
+      case "ext.dart.io.socketProfilingEnabled":
+        if (params.enabled !== undefined) {
+          socketsEnabled = params.enabled === "true";
+          if (socketsEnabled && !sockets.length)
+            setTimeout(populateSockets, 100);
+        }
+        result = { enabled: socketsEnabled };
+        break;
+      case "ext.dart.io.getSocketProfile":
+        result = { sockets };
         break;
       case "ext.dart.io.getHttpProfileRequest":
         result = requests.find((request) => request.id === params.id);
@@ -318,6 +365,8 @@ process.stdin.on("data", (data) => {
     isolateId = `isolates/${++revision}`;
     enabled = false;
     requests = [];
+    socketsEnabled = false;
+    sockets = [];
     console.log("Synthetic isolate restarted.");
   }
 });
