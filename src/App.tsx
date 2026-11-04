@@ -76,10 +76,7 @@ export default function App({
   const [socketKey, setSocketKey] = useState<string>();
   const [methods, setMethods] = useState<string[]>([]);
   const [status, setStatus] = useState("all");
-  const [sort, setSort] = useState<Sort>({
-    column: "start",
-    direction: "desc",
-  });
+  const [sort, setSort] = useState<Sort>({ column: "start", direction: "asc" });
   const availableMethods = useMemo(
     () => [
       ...new Set([

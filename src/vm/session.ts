@@ -49,6 +49,8 @@ type Context = {
   active: boolean;
   revision: number;
   floor?: { startTime: number; key: string };
+  /** Sockets at or before this were evicted and are not rebuilt. */
+  socketFloor?: { startTime: number; key: string };
   /** Wall-clock time of connecting. */
   connectedAt: number;
 };
@@ -200,6 +202,7 @@ export class CaptureSession {
     };
     // The Flutrace WebSocket helper posts to the Extension stream.
     await rpc.call("streamListen", { streamId: "Extension" }).catch(() => {});
+    if (!this.live(ctx)) return;
     this.emit({ status: "connected" });
     await this.refresh();
     this.schedule(ctx);
@@ -505,6 +508,12 @@ export class CaptureSession {
           const key = `${ctx.id}:${isolateId}:${String(raw.id)}`;
           if (state.sockets.known.has(String(raw.id)) && !rows.has(key))
             continue;
+          if (
+            !rows.has(key) &&
+            ctx.socketFloor &&
+            compare({ startTime: raw.startTime, key }, ctx.socketFloor) <= 0
+          )
+            continue;
           const previous = rows.get(key);
           const readBytes = Number(raw.readBytes) || 0;
           const writeBytes = Number(raw.writeBytes) || 0;
@@ -535,7 +544,9 @@ export class CaptureSession {
         /* Keep the previous socket rows. */
       }
     }
-    return [...rows.values()].sort(compare).slice(-2000);
+    const sorted = [...rows.values()].sort(compare);
+    if (sorted.length > 2000) ctx.socketFloor = sorted[sorted.length - 2001];
+    return sorted.slice(-2000);
   }
 
   private onExtension(ctx: Context, event: unknown) {
@@ -545,7 +556,9 @@ export class CaptureSession {
       isolate?: { id?: string };
     };
     if (value?.extensionKind !== WS_EVENT_KIND || !value.extensionData) return;
-    if (!this.snapshot.recording) return;
+    // A close still applies while paused, or the connection would look open forever.
+    if (!this.snapshot.recording && value.extensionData.type !== "close")
+      return;
     // DDS replays the stream's history to new listeners; skip what predates connecting.
     if (Number(value.extensionData.at) < ctx.connectedAt - CLOCK_SLACK_MS)
       return;
@@ -562,6 +575,8 @@ export class CaptureSession {
     this.wsTimer = undefined;
     const pending = this.wsPending.splice(0);
     const byKey = new Map(this.snapshot.webSockets.map((c) => [c.key, c]));
+    // Connections already copied in this flush, so a burst mutates one copy.
+    const copied = new Set<string>();
     let changed = false;
     for (const { ctx, isolateId, data } of pending) {
       if (!this.live(ctx)) continue;
@@ -572,23 +587,36 @@ export class CaptureSession {
       let connection = byKey.get(key);
       if (data.type === "open" || !connection) {
         if (data.type !== "open" && data.type !== "message") continue;
-        connection = connection ?? {
-          key,
-          id,
-          isolateId,
-          session: ctx.id,
-          url: String(data.url ?? ""),
-          openedAt: at,
-          messages: [],
-          total: 0,
-          bytesIn: 0,
-          bytesOut: 0,
-        };
+        if (!connection) {
+          connection = {
+            key,
+            id,
+            isolateId,
+            session: ctx.id,
+            url: String(data.url ?? ""),
+            openedAt: at,
+            messages: [],
+            total: 0,
+            bytesIn: 0,
+            bytesOut: 0,
+            activity: [],
+          };
+          copied.add(key);
+        }
         if (data.type === "open") {
           byKey.set(key, connection);
           changed = true;
           continue;
         }
+      }
+      if (data.type !== "message" && data.type !== "close") continue;
+      if (!copied.has(key)) {
+        connection = {
+          ...connection,
+          messages: [...connection.messages],
+          activity: [...connection.activity],
+        };
+        copied.add(key);
       }
       if (data.type === "message") {
         const message: WsMessage = {
@@ -600,30 +628,38 @@ export class CaptureSession {
           binary: data.binary === true,
           truncated: data.truncated === true,
         };
-        const messages = [...connection.messages, message];
-        connection = {
-          ...connection,
-          messages:
-            messages.length > WS_MESSAGE_LIMIT
-              ? messages.slice(-WS_MESSAGE_LIMIT)
-              : messages,
-          total: connection.total + 1,
-          bytesIn:
-            connection.bytesIn +
-            (message.direction === "in" ? message.size : 0),
-          bytesOut:
-            connection.bytesOut +
-            (message.direction === "out" ? message.size : 0),
-        };
-      } else if (data.type === "close") {
-        connection = {
-          ...connection,
-          closedAt: at,
-          closeCode: Number.isInteger(data.code)
-            ? Number(data.code)
-            : undefined,
-        };
-      } else continue;
+        connection.messages.push(message);
+        if (connection.messages.length > WS_MESSAGE_LIMIT)
+          connection.messages.shift();
+        connection.total += 1;
+        if (message.direction === "in") connection.bytesIn += message.size;
+        else connection.bytesOut += message.size;
+        const second = Math.floor(at / 1000) * 1000;
+        const last = connection.activity[connection.activity.length - 1];
+        if (last?.at === second) {
+          // Replace the entry: the previous snapshot may still share it.
+          connection.activity[connection.activity.length - 1] = {
+            at: second,
+            read: last.read + (message.direction === "in" ? message.size : 0),
+            write:
+              last.write + (message.direction === "out" ? message.size : 0),
+          };
+        } else {
+          connection.activity.push({
+            at: second,
+            read: message.direction === "in" ? message.size : 0,
+            write: message.direction === "out" ? message.size : 0,
+          });
+          if (connection.activity.length > ACTIVITY_LIMIT)
+            connection.activity.shift();
+        }
+        connection.lastActive = at;
+      } else {
+        connection.closedAt = at;
+        connection.closeCode = Number.isInteger(data.code)
+          ? Number(data.code)
+          : undefined;
+      }
       byKey.set(key, connection);
       changed = true;
     }

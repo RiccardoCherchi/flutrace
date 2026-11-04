@@ -387,7 +387,14 @@ it("collects app-reported WebSocket messages per connection", async () => {
     text: '{"p":"1"}',
     at: base + 100,
   });
-  vm.ws({ type: "message", id: "1", direction: "out", size: 2, text: "hi" });
+  vm.ws({
+    type: "message",
+    id: "1",
+    direction: "out",
+    size: 2,
+    text: "hi",
+    at: base + 200,
+  });
   // Unrelated extension events are ignored.
   vm.onEvent?.("Extension", { extensionKind: "other", extensionData: {} });
   await new Promise((resolve) => setTimeout(resolve, 150));
@@ -400,6 +407,18 @@ it("collects app-reported WebSocket messages per connection", async () => {
     ["in", '{"p":"1"}'],
     ["out", "hi"],
   ]);
+  // Per-second activity is kept as messages arrive.
+  const second = Math.floor((base + 100) / 1000) * 1000;
+  const split = Math.floor((base + 200) / 1000) * 1000 !== second;
+  expect(connection.activity).toEqual(
+    split
+      ? [
+          { at: second, read: 9, write: 0 },
+          { at: second + 1000, read: 0, write: 2 },
+        ]
+      : [{ at: second, read: 9, write: 2 }],
+  );
+  expect(connection.lastActive).toBe(base + 200);
   vm.ws({ type: "close", id: "1", code: 1000, at: base + 1000 });
   await new Promise((resolve) => setTimeout(resolve, 150));
   expect(session.getSnapshot().webSockets[0]).toMatchObject({
@@ -438,4 +457,77 @@ it("ignores WebSocket events replayed from before connecting", async () => {
   expect(session.getSnapshot().webSockets.map((c) => c.url)).toEqual([
     "wss://x.test/new",
   ]);
+});
+it("copies a connection once per burst and leaves earlier snapshots intact", async () => {
+  const { vm, session } = setup();
+  await session.connect("unused");
+  const at = Math.floor(Date.now() / 1000) * 1000;
+  vm.ws({ type: "open", id: "1", url: "wss://x.test/ws", at });
+  vm.ws({ type: "message", id: "1", direction: "in", size: 1, at });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const before = session.getSnapshot().webSockets[0];
+  for (let n = 0; n < 1005; n++)
+    vm.ws({ type: "message", id: "1", direction: "in", size: 1, at });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const after = session.getSnapshot().webSockets[0];
+  expect(before.messages).toHaveLength(1);
+  expect(before.activity).toEqual([{ at, read: 1, write: 0 }]);
+  expect(after.total).toBe(1006);
+  expect(after.messages).toHaveLength(1000);
+  expect(after.messages[0].seq).toBe(6);
+  expect(after.bytesIn).toBe(1006);
+  expect(after.activity).toEqual([{ at, read: 1006, write: 0 }]);
+});
+it("applies WebSocket close events while recording is paused", async () => {
+  const { vm, session } = setup();
+  await session.connect("unused");
+  const base = Date.now();
+  vm.ws({ type: "open", id: "1", url: "wss://x.test/ws", at: base });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  await session.setRecording(false);
+  vm.ws({ type: "message", id: "1", direction: "in", size: 3, at: base + 1 });
+  vm.ws({ type: "close", id: "1", code: 1001, at: base + 2 });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(session.getSnapshot().webSockets[0]).toMatchObject({
+    total: 0,
+    closedAt: base + 2,
+    closeCode: 1001,
+  });
+});
+it("does not report connected when the VM closes during streamListen", async () => {
+  const vm = new Vm();
+  let release!: () => void;
+  const listening = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const call = vm.call.bind(vm);
+  vm.call = (async (method: string, params?: Record<string, unknown>) => {
+    if (method === "streamListen") await listening;
+    return call(method, params);
+  }) as Vm["call"];
+  const { session } = setup(vm);
+  const connecting = session.connect("unused");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  vm.close();
+  release();
+  await connecting;
+  expect(session.getSnapshot().status).toBe("disconnected");
+});
+it("keeps the newest 2000 sockets across polls", async () => {
+  const { vm, session } = setup();
+  await session.connect("unused");
+  vm.socketProfiles.set(
+    "i",
+    Array.from({ length: 2005 }, (_, n) =>
+      socket(String(n), 101 + n, { readBytes: 10 }),
+    ),
+  );
+  await session.refresh();
+  expect(session.getSnapshot().sockets).toHaveLength(2000);
+  expect(session.getSnapshot().sockets[0].id).toBe("5");
+  await session.refresh();
+  const sockets = session.getSnapshot().sockets;
+  expect(sockets).toHaveLength(2000);
+  expect(sockets[0].id).toBe("5");
+  expect(sockets.some((row) => row.id === "0")).toBe(false);
 });

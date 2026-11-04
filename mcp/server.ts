@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { toCurl } from "../src/curl.ts";
 import { matchesStatus } from "../src/request-list.ts";
+import { socketDuration } from "../src/sockets.ts";
 import type { Body, RequestDetail } from "../src/vm/body.ts";
 import type { CaptureSession } from "../src/vm/session.ts";
 import { durationMs, mimeType, requestError } from "../src/vm/types.ts";
@@ -220,10 +221,7 @@ export function createServer(
           state: row.endTime === undefined ? "open" : "closed",
           readBytes: row.readBytes,
           writeBytes: row.writeBytes,
-          durationMs:
-            row.endTime === undefined
-              ? undefined
-              : (row.endTime - row.startTime) / 1000,
+          durationMs: socketDuration(row),
         })),
       });
     },

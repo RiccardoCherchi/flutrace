@@ -107,5 +107,8 @@ export type WsConnection = {
   total: number;
   bytesIn: number;
   bytesOut: number;
+  /** Per-second message bytes, kept as messages arrive. */
+  activity: SocketActivity[];
+  lastActive?: number;
 };
 export const WS_MESSAGE_LIMIT = 1000;

@@ -25,7 +25,21 @@ function formatSpan(microseconds: number) {
   const ms = microseconds / 1000;
   return ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
-const ROW_HEIGHT = 26;
+export const ROW_HEIGHT = 26;
+/** The slice of rows to render for a scroll position, with overscan. */
+export function visibleRange(top: number, height: number, count: number) {
+  const start = Math.max(
+    0,
+    Math.min(
+      Math.max(0, count - 1),
+      Math.floor((top - ROW_HEIGHT) / ROW_HEIGHT) - 5,
+    ),
+  );
+  return {
+    start,
+    end: Math.min(count, start + Math.ceil(height / ROW_HEIGHT) + 12),
+  };
+}
 export function RequestTable({
   rows,
   sort,
@@ -80,17 +94,7 @@ export function RequestTable({
       setAdded((count) => count + inserted);
     }
   }, [rows, newestFirst, selectedKey]);
-  const start = Math.max(
-    0,
-    Math.min(
-      Math.max(0, rows.length - 1),
-      Math.floor((top - ROW_HEIGHT) / ROW_HEIGHT) - 5,
-    ),
-  );
-  const end = Math.min(
-    rows.length,
-    start + Math.ceil(height / ROW_HEIGHT) + 12,
-  );
+  const { start, end } = visibleRange(top, height, rows.length);
   const origin = rows.reduce(
     (earliest, row) => Math.min(earliest, row.startTime),
     rows[0]?.startTime ?? 0,

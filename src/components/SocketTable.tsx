@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SocketRow } from "../vm/types.ts";
-import { formatBytes } from "./RequestTable.tsx";
+import { ROW_HEIGHT, formatBytes, visibleRange } from "./RequestTable.tsx";
 import {
   formatAgo,
   formatRate,
   socketAddress,
   socketBuckets,
+  socketDuration,
   socketRate,
 } from "../sockets.ts";
 import type { SocketLabel } from "../sockets.ts";
@@ -18,12 +19,6 @@ export function useNow() {
     return () => clearInterval(timer);
   }, []);
   return now;
-}
-
-export function socketDuration(row: SocketRow) {
-  return row.endTime === undefined
-    ? undefined
-    : Math.max(0, (row.endTime - row.startTime) / 1000);
 }
 
 /** How long a row stays marked after it moved data. */
@@ -70,9 +65,23 @@ export function SocketTable({
   onSelect: (key: string) => void;
 }) {
   const now = useNow();
+  const scroll = useRef<HTMLDivElement>(null);
+  const [top, setTop] = useState(0);
+  const [height, setHeight] = useState(600);
+  useEffect(() => {
+    const element = scroll.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setHeight(element.clientHeight));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  // Only the visible slice renders, so the per-second tick stays cheap with many sockets.
+  const { start, end } = visibleRange(top, height, rows.length);
   return (
     <div
       className="table-scroll"
+      ref={scroll}
+      onScroll={(event) => setTop(event.currentTarget.scrollTop)}
       tabIndex={0}
       role="region"
       aria-label="Captured sockets"
@@ -95,6 +104,13 @@ export function SocketTable({
                   ),
                 );
         onSelect(rows[next].key);
+        const element = scroll.current;
+        if (
+          element &&
+          (next * ROW_HEIGHT < element.scrollTop ||
+            (next + 2) * ROW_HEIGHT > element.scrollTop + height)
+        )
+          element.scrollTop = Math.max(0, next * ROW_HEIGHT - height / 2);
       }}
     >
       <table className="socket-table" aria-rowcount={rows.length + 1}>
@@ -140,7 +156,15 @@ export function SocketTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {start > 0 && (
+            <tr aria-hidden="true">
+              <td
+                colSpan={8}
+                style={{ height: start * ROW_HEIGHT, padding: 0, border: 0 }}
+              />
+            </tr>
+          )}
+          {rows.slice(start, end).map((row, index) => {
             const open = row.endTime === undefined;
             const label = labels.get(row.key);
             const rate = socketRate(row, now);
@@ -152,6 +176,7 @@ export function SocketTable({
                 key={row.key}
                 className={`${selectedKey === row.key ? "selected" : ""} ${pulsing ? "pulse" : ""}`}
                 aria-selected={selectedKey === row.key}
+                aria-rowindex={start + index + 2}
                 onClick={() => onSelect(row.key)}
               >
                 <td title={label ? `${label.host} (${address})` : address}>
@@ -199,6 +224,18 @@ export function SocketTable({
               </tr>
             );
           })}
+          {end < rows.length && (
+            <tr aria-hidden="true">
+              <td
+                colSpan={8}
+                style={{
+                  height: (rows.length - end) * ROW_HEIGHT,
+                  padding: 0,
+                  border: 0,
+                }}
+              />
+            </tr>
+          )}
         </tbody>
       </table>
     </div>

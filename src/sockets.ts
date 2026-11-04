@@ -1,7 +1,6 @@
 import type {
   HttpRequest,
   RequestRow,
-  SocketActivity,
   SocketRow,
   WsConnection,
 } from "./vm/types.ts";
@@ -24,14 +23,18 @@ function portOf(url: URL) {
   return url.protocol === "http:" || url.protocol === "ws:" ? 80 : 443;
 }
 
-/** The VM reports only the remote IP, so sockets are named after the one host that used their port. */
+/**
+ * The VM reports only the remote IP, so sockets are named after the one host that used their port.
+ * Only the socket that opened closest to a `101` handshake is labelled a WebSocket, so plain
+ * HTTPS sockets on the same port are not.
+ */
 export function labelSockets(
   sockets: SocketRow[],
   requests: RequestRow[],
 ): Map<string, SocketLabel> {
   const byPort = new Map<
     string,
-    { hosts: Set<string>; upgrade?: RequestRow }
+    { hosts: Set<string>; upgrades: RequestRow[] }
   >();
   for (const request of requests) {
     let url: URL;
@@ -41,25 +44,51 @@ export function labelSockets(
       continue;
     }
     const id = `${request.session}:${portOf(url)}`;
-    const candidate = byPort.get(id) ?? { hosts: new Set<string>() };
+    const candidate = byPort.get(id) ?? {
+      hosts: new Set<string>(),
+      upgrades: [],
+    };
     candidate.hosts.add(url.hostname);
-    if (request.response?.statusCode === 101) candidate.upgrade = request;
+    if (request.response?.statusCode === 101) candidate.upgrades.push(request);
     byPort.set(id, candidate);
   }
-  const labels = new Map<string, SocketLabel>();
+  const eligible = new Map<string, SocketRow[]>();
   for (const socket of sockets) {
-    const candidate = byPort.get(`${socket.session}:${socket.port}`);
+    const id = `${socket.session}:${socket.port}`;
+    const candidate = byPort.get(id);
     if (
       !candidate ||
       candidate.hosts.size !== 1 ||
       socket.socketType.toLowerCase() !== "tcp"
     )
       continue;
-    labels.set(socket.key, {
-      host: [...candidate.hosts][0],
-      webSocket: !!candidate.upgrade,
-      requestKey: candidate.upgrade?.key,
-    });
+    const list = eligible.get(id) ?? [];
+    list.push(socket);
+    eligible.set(id, list);
+  }
+  const labels = new Map<string, SocketLabel>();
+  for (const [id, list] of eligible) {
+    const candidate = byPort.get(id)!;
+    const host = [...candidate.hosts][0];
+    for (const socket of list)
+      labels.set(socket.key, { host, webSocket: false });
+    // Each handshake claims the nearest socket not already claimed.
+    const claimed = new Set<string>();
+    for (const upgrade of candidate.upgrades) {
+      let best: SocketRow | undefined;
+      for (const socket of list) {
+        if (claimed.has(socket.key)) continue;
+        if (
+          !best ||
+          Math.abs(socket.startTime - upgrade.startTime) <
+            Math.abs(best.startTime - upgrade.startTime)
+        )
+          best = socket;
+      }
+      if (!best) continue;
+      claimed.add(best.key);
+      labels.set(best.key, { host, webSocket: true, requestKey: upgrade.key });
+    }
   }
   return labels;
 }
@@ -88,6 +117,22 @@ export function socketBuckets(row: SocketRow, now: number, seconds = 30) {
     if (age >= 0) buckets[seconds - 1 - age] += entry.read + entry.write;
   }
   return buckets;
+}
+
+export function socketDuration(row: SocketRow) {
+  return row.endTime === undefined
+    ? undefined
+    : Math.max(0, (row.endTime - row.startTime) / 1000);
+}
+
+const two = (n: number) => String(n).padStart(2, "0");
+/** Local wall-clock time, `HH:MM:SS` or `HH:MM:SS.mmm`. */
+export function clock(ms: number, millis = false) {
+  const date = new Date(ms);
+  const time = `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
+  return millis
+    ? `${time}.${String(date.getMilliseconds()).padStart(3, "0")}`
+    : time;
 }
 
 export function formatRate(bytesPerSecond: number) {
@@ -176,18 +221,6 @@ export function helperSocketRows(
     } catch {
       continue;
     }
-    const activity: SocketActivity[] = [];
-    for (const message of connection.messages) {
-      const second = Math.floor(message.at / 1000) * 1000;
-      let last = activity[activity.length - 1];
-      if (!last || last.at !== second) {
-        last = { at: second, read: 0, write: 0 };
-        activity.push(last);
-      }
-      if (message.direction === "in") last.read += message.size;
-      else last.write += message.size;
-    }
-    const lastMessage = connection.messages[connection.messages.length - 1];
     rows.push({
       key: connection.key,
       id: connection.id,
@@ -203,8 +236,8 @@ export function helperSocketRows(
           : connection.closedAt * 1000,
       readBytes: connection.bytesIn,
       writeBytes: connection.bytesOut,
-      activity,
-      lastActive: lastMessage?.at,
+      activity: connection.activity,
+      lastActive: connection.lastActive,
     });
     labels.set(connection.key, { host: url.hostname, webSocket: true });
   }

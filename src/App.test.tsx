@@ -403,6 +403,10 @@ it("keeps an open request in place when newer requests arrive", async () => {
   await session.refresh();
   render(<App session={session} />);
   try {
+    // Oldest first is the default; switch to newest first.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Sort by Waterfall" }),
+    );
     await userEvent.click(screen.getByRole("button", { name: /first/ }));
     expect(screen.queryByRole("button", { name: /new request/ })).toBeNull();
     vm.profiles.set("i", [

@@ -7,21 +7,17 @@ import {
 } from "./WebSocketMessages.tsx";
 import type { SocketLabel } from "../sockets.ts";
 import {
+  clock,
   formatAgo,
   formatRate,
   socketAddress,
   socketBuckets,
+  socketDuration,
   socketRate,
 } from "../sockets.ts";
 import { CloseIcon } from "./Icons.tsx";
 import { formatBytes, formatDuration } from "./RequestTable.tsx";
-import { Sparkline, socketDuration, useNow } from "./SocketTable.tsx";
-
-const two = (n: number) => String(n).padStart(2, "0");
-function clock(ms: number) {
-  const date = new Date(ms);
-  return `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
-}
+import { Sparkline, useNow } from "./SocketTable.tsx";
 
 export function SocketDetails({
   row,

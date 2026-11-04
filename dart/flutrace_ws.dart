@@ -45,14 +45,17 @@ class _TracedWebSocket extends StreamView<dynamic> implements WebSocket {
         return data;
       }),
     );
-    socket.done.whenComplete(
-      () => _post({
-        'type': 'close',
-        'id': id,
-        'url': url,
-        'code': socket.closeCode,
-      }),
-    );
+    // The derived future rethrows done's error; ignore it so tracing adds no uncaught error.
+    socket.done
+        .whenComplete(
+          () => _post({
+            'type': 'close',
+            'id': id,
+            'url': url,
+            'code': socket.closeCode,
+          }),
+        )
+        .ignore();
     return traced;
   }
 

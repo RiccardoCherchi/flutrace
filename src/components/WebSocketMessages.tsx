@@ -1,13 +1,8 @@
 import { useMemo, useRef, useState } from "react";
 import type { UIEvent } from "react";
 import type { WsConnection, WsMessage } from "../vm/types.ts";
+import { clock } from "../sockets.ts";
 import { formatBytes } from "./RequestTable.tsx";
-
-const two = (n: number) => String(n).padStart(2, "0");
-function clock(ms: number) {
-  const date = new Date(ms);
-  return `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}.${String(date.getMilliseconds()).padStart(3, "0")}`;
-}
 function pretty(text: string) {
   try {
     return JSON.stringify(JSON.parse(text), null, 2);
@@ -194,7 +189,7 @@ export function MessagesList({ view }: { view: MessageView }) {
                   <span className="ws-size muted">
                     {formatBytes(message.size)}
                   </span>
-                  <time className="muted">{clock(message.at)}</time>
+                  <time className="muted">{clock(message.at, true)}</time>
                 </button>
                 {isOpen && !message.binary && message.text !== undefined && (
                   <pre className="ws-body">
@@ -231,11 +226,7 @@ export function WebSocketMessages({
   return (
     <section className="ws-messages fill" aria-label="WebSocket messages pane">
       <MessagesToolbar view={view} />
-      <div
-        className="ws-scroll"
-        ref={view.scrollRef}
-        onScroll={view.onScroll}
-      >
+      <div className="ws-scroll" ref={view.scrollRef} onScroll={view.onScroll}>
         <MessagesList view={view} />
       </div>
     </section>
